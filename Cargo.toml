@@ -1,0 +1,26 @@
+[package]
+name = "mnema"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["crates/core", "crates/infra", "crates/desktop"]
+
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.0.1"
+license = "Apache-2.0"
+authors = ["Aod <you@example.com>"]
+description = "Mnema - local-first, AI-assisted task memory"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["macros", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
