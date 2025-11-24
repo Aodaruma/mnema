@@ -10,3 +10,6 @@ mnema-infra = { path = "../infra" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
+tokio = { version = "1.48", features = ["full"] }
+time = { workspace = true }

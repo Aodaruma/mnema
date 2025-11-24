@@ -12,5 +12,6 @@ pub mod prelude {
     };
 }
 
+pub mod automation;
 pub mod db;
 pub mod llm;

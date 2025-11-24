@@ -1,6 +1,7 @@
 //! Core domain models and services for Mnema.
 
 pub mod assistant;
+pub mod automation;
 pub mod automation_log;
 pub mod ids;
 pub mod list;
@@ -14,6 +15,7 @@ pub mod user_settings;
 
 pub mod prelude {
     pub use crate::assistant::*;
+    pub use crate::automation::*;
     pub use crate::automation_log::*;
     pub use crate::ids::*;
     pub use crate::list::*;

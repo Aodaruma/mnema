@@ -944,10 +944,13 @@ dependencies = [
 name = "mnema-desktop"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "mnema-core",
  "mnema-infra",
  "serde",
  "serde_json",
+ "time",
+ "tokio",
  "tracing",
 ]
 
