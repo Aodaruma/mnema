@@ -6,6 +6,11 @@
 
 pub mod prelude {
     // Re-export infra helpers later.
+    pub use crate::db::Vault;
+    pub use crate::llm::{
+        ChatMessage, ChatRole, LlmClient, LlmConfig, OllamaClient, OpenAiCompatibleClient,
+    };
 }
 
 pub mod db;
+pub mod llm;

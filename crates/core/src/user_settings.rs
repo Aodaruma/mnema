@@ -47,7 +47,6 @@ impl Default for AutomationSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeeklyReviewSettings {
-    #[serde(with = "time::serde::time::option")]
     pub scheduled_time: Option<Time>,
     pub template: Option<String>,
 }

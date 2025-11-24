@@ -4,7 +4,7 @@ use crate::project::Project;
 use crate::status::{Status, StatusGroup};
 use crate::task::Task;
 use crate::{
-    ids::{ListId, MilestoneId, ProjectId, StatusGroupId, StatusId, TaskId},
+    ids::{ListId, MilestoneId, ProjectId, TaskId},
     user_settings::UserSettings,
 };
 use thiserror::Error;

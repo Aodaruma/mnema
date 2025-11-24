@@ -403,41 +403,59 @@ impl ProjectRepository for SqliteProjectRepository {
             .await
             .map_err(map_storage_err)?;
 
-        rows.into_iter()
-            .map(|row| {
-                let id = uuid::Uuid::parse_str(row.try_get::<String, _>("id")?.as_str())?;
-                Ok(Project {
-                    id: ProjectId::from(id),
-                    title: row.try_get("title")?,
-                    description: row.try_get("description")?,
-                    start_date: row
-                        .try_get::<Option<String>, _>("start_date")?
-                        .as_deref()
-                        .map(date_from_string)
-                        .transpose()?,
-                    end_date: row
-                        .try_get::<Option<String>, _>("end_date")?
-                        .as_deref()
-                        .map(date_from_string)
-                        .transpose()?,
-                    default_status_set_id: row
-                        .try_get::<Option<String>, _>("default_status_set_id")?
-                        .map(|s| uuid::Uuid::parse_str(&s))
-                        .transpose()?
-                        .map(StatusGroupId::from),
-                    archived_at: row
-                        .try_get::<Option<String>, _>("archived_at")?
-                        .as_deref()
-                        .map(from_rfc3339)
-                        .transpose()?,
-                })
-            })
-            .map(|r| r.map_err(map_storage_err))
-            .collect()
+        let mut projects = Vec::new();
+        for row in rows {
+            let id = uuid::Uuid::parse_str(
+                row.try_get::<String, _>("id")
+                    .map_err(map_storage_err)?
+                    .as_str(),
+            )
+            .map_err(map_storage_err)?;
+            let title = row.try_get("title").map_err(map_storage_err)?;
+            let description = row.try_get("description").map_err(map_storage_err)?;
+            let start_date = row
+                .try_get::<Option<String>, _>("start_date")
+                .map_err(map_storage_err)?
+                .as_deref()
+                .map(date_from_string)
+                .transpose()
+                .map_err(map_storage_err)?;
+            let end_date = row
+                .try_get::<Option<String>, _>("end_date")
+                .map_err(map_storage_err)?
+                .as_deref()
+                .map(date_from_string)
+                .transpose()
+                .map_err(map_storage_err)?;
+            let default_status_set_id = row
+                .try_get::<Option<String>, _>("default_status_set_id")
+                .map_err(map_storage_err)?
+                .map(|s| uuid::Uuid::parse_str(&s).map_err(map_storage_err))
+                .transpose()?
+                .map(StatusGroupId::from);
+            let archived_at = row
+                .try_get::<Option<String>, _>("archived_at")
+                .map_err(map_storage_err)?
+                .as_deref()
+                .map(from_rfc3339)
+                .transpose()
+                .map_err(map_storage_err)?;
+
+            projects.push(Project {
+                id: ProjectId::from(id),
+                title,
+                description,
+                start_date,
+                end_date,
+                default_status_set_id,
+                archived_at,
+            });
+        }
+        Ok(projects)
     }
 
     async fn update(&self, project: Project) -> CoreResult<()> {
-        let res = sqlx::query(
+        sqlx::query(
             r#"
             UPDATE projects SET
                 title = ?, description = ?, start_date = ?, end_date = ?,
@@ -678,11 +696,9 @@ impl MilestoneRepository for SqliteMilestoneRepository {
 }
 
 fn row_to_milestone(row: sqlx::sqlite::SqliteRow) -> Result<Milestone> {
-    let deps: Vec<TaskId> =
-        serde_json::from_str(row.try_get::<String, _>("dependency_task_ids")?.as_str())?
-            .into_iter()
-            .map(TaskId::from)
-            .collect();
+    let dep_ids: Vec<uuid::Uuid> =
+        serde_json::from_str(row.try_get::<String, _>("dependency_task_ids")?.as_str())?;
+    let deps: Vec<TaskId> = dep_ids.into_iter().map(TaskId::from).collect();
     let status_str: String = row.try_get("status")?;
     let status = milestone_status_from_str(&status_str);
     Ok(Milestone {
@@ -755,20 +771,24 @@ impl StatusRepository for SqliteStatusRepository {
             .await
             .map_err(map_storage_err)?;
 
-        rows.into_iter()
-            .map(|row| {
-                let kind_str: String = row.try_get("kind")?;
-                let kind = status_kind_from_str(&kind_str);
-                Ok(StatusGroup {
-                    id: StatusGroupId::from(uuid::Uuid::parse_str(
-                        row.try_get::<String, _>("id")?.as_str(),
-                    )?),
-                    name: row.try_get("name")?,
-                    kind,
-                })
-            })
-            .map(|r| r.map_err(map_storage_err))
-            .collect()
+        let mut groups = Vec::new();
+        for row in rows {
+            let kind_str: String = row.try_get("kind").map_err(map_storage_err)?;
+            let kind = status_kind_from_str(&kind_str);
+            let id = uuid::Uuid::parse_str(
+                row.try_get::<String, _>("id")
+                    .map_err(map_storage_err)?
+                    .as_str(),
+            )
+            .map_err(map_storage_err)?;
+            let name = row.try_get("name").map_err(map_storage_err)?;
+            groups.push(StatusGroup {
+                id: StatusGroupId::from(id),
+                name,
+                kind,
+            });
+        }
+        Ok(groups)
     }
 
     async fn list_statuses_for_project(
@@ -787,26 +807,38 @@ impl StatusRepository for SqliteStatusRepository {
                 .map_err(map_storage_err)?,
         };
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(Status {
-                    id: StatusId::from(uuid::Uuid::parse_str(
-                        row.try_get::<String, _>("id")?.as_str(),
-                    )?),
-                    project_id: row
-                        .try_get::<Option<String>, _>("project_id")?
-                        .map(|s| uuid::Uuid::parse_str(&s))
-                        .transpose()?
-                        .map(ProjectId::from),
-                    name: row.try_get("name")?,
-                    group_id: StatusGroupId::from(uuid::Uuid::parse_str(
-                        row.try_get::<String, _>("group_id")?.as_str(),
-                    )?),
-                    order: row.try_get::<i64, _>("order")? as i32,
-                })
-            })
-            .map(|r| r.map_err(map_storage_err))
-            .collect()
+        let mut statuses = Vec::new();
+        for row in rows {
+            let id = uuid::Uuid::parse_str(
+                row.try_get::<String, _>("id")
+                    .map_err(map_storage_err)?
+                    .as_str(),
+            )
+            .map_err(map_storage_err)?;
+            let project_id = row
+                .try_get::<Option<String>, _>("project_id")
+                .map_err(map_storage_err)?
+                .map(|s| uuid::Uuid::parse_str(&s).map_err(map_storage_err))
+                .transpose()?
+                .map(ProjectId::from);
+            let name = row.try_get("name").map_err(map_storage_err)?;
+            let group_id = uuid::Uuid::parse_str(
+                row.try_get::<String, _>("group_id")
+                    .map_err(map_storage_err)?
+                    .as_str(),
+            )
+            .map_err(map_storage_err)?;
+            let order = row.try_get::<i64, _>("order").map_err(map_storage_err)? as i32;
+
+            statuses.push(Status {
+                id: StatusId::from(id),
+                project_id,
+                name,
+                group_id: StatusGroupId::from(group_id),
+                order,
+            });
+        }
+        Ok(statuses)
     }
 }
 

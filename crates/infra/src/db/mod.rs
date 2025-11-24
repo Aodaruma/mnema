@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use sqlx::{migrate::MigrateDatabase, sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::{SqlitePool, migrate::MigrateDatabase, sqlite::SqliteConnectOptions};
 
 mod repositories;
 

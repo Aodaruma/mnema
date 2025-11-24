@@ -17,11 +17,12 @@ async fn default_status(vault: &Vault) -> Status {
         name: "Not started".into(),
         kind: StatusGroupKind::NotStarted,
     };
+    let group_id = group.id.clone();
     let status = Status {
         id: StatusId::new(),
         project_id: None,
         name: "Todo".into(),
-        group_id: group.id,
+        group_id,
         order: 0,
     };
     let repo = vault.status_repo();
@@ -46,11 +47,12 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
         default_status_set_id: None,
         archived_at: None,
     };
+    let project_id = project.id.clone();
     vault.project_repo().insert(project.clone()).await?;
 
     let list = List {
         id: ListId::new(),
-        project_id: Some(project.id),
+        project_id: Some(project_id.clone()),
         name: "Main".into(),
         is_system: false,
         kind: ListKind::Project,
@@ -64,7 +66,7 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
         id: TaskId::new(),
         title: "Write code".into(),
         description: Some("implement phase 2".into()),
-        project_id: Some(project.id),
+        project_id: Some(project_id.clone()),
         list_id: Some(list.id),
         status_id: status.id,
         due_date: Some(today()),
@@ -81,14 +83,16 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
     let repo = vault.task_repo();
     repo.insert(task.clone()).await?;
 
-    let fetched = repo.find(task.id).await?;
+    let task_id = task.id.clone();
+
+    let fetched = repo.find(task_id.clone()).await?;
     assert_eq!(Some(task.clone()), fetched);
 
     task.title = "Write code (updated)".into();
     task.updated_at = utc_now();
     repo.update(task.clone()).await?;
 
-    let fetched = repo.find(task.id).await?.unwrap();
+    let fetched = repo.find(task_id).await?.unwrap();
     assert_eq!("Write code (updated)", fetched.title);
 
     Ok(())
@@ -105,14 +109,16 @@ async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
     settings.model_for_planning = Some("gpt-4.1".into());
 
     repo.upsert(settings.clone()).await?;
-    let stored = repo.get(settings.user_id).await?.expect("stored");
+    let user_id = settings.user_id.clone();
+
+    let stored = repo.get(user_id.clone()).await?.expect("stored");
 
     assert_eq!(settings.provider, stored.provider);
     assert_eq!(settings.model_for_planning, stored.model_for_planning);
 
     settings.model_for_planning = Some("gpt-4.1-mini".into());
     repo.upsert(settings.clone()).await?;
-    let stored_again = repo.get(settings.user_id).await?.expect("stored");
+    let stored_again = repo.get(user_id).await?.expect("stored");
     assert_eq!(stored_again.model_for_planning, settings.model_for_planning);
 
     Ok(())
