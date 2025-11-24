@@ -71,7 +71,7 @@ When adding new features:
 
 ## 4. Coding style and conventions
 
-- Prefer **Rust 2021** idioms.
+- Prefer **Rust 2024** idioms.
 - Aim for:
   - clear naming
   - small, focused modules
