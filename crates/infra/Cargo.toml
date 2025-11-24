@@ -7,7 +7,7 @@ edition = "2021"
 # core のドメインモデルを使う
 mnema-core = { path = "../core" }
 
-# workspace 共通
+# workspace 共有
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
@@ -15,6 +15,7 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
 
 # 非同期ランタイム
 tokio = { version = "1.48", features = ["full"] }
@@ -24,10 +25,14 @@ sqlx = { version = "0.8.6", features = [
     "sqlite",
     "runtime-tokio-rustls",
     "macros",
+    "migrate",
 ] }
 
-# HTTP クライアント (LLM / 将来の同期 API 用)
+# HTTP クライアント(LLM / 将来の同期 API 用)
 reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
 
 # 設定ファイルなどで TOML を読む場合に使う
-toml = "0.8"
+toml = "0.9.8"
+
+[dev-dependencies]
+tempfile = "3"
