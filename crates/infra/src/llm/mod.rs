@@ -19,6 +19,8 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+pub mod factory;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LlmConfig {
     pub model: String,
@@ -26,8 +28,20 @@ pub struct LlmConfig {
     pub max_tokens: Option<u32>,
 }
 
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            model: "default".into(),
+            temperature: Some(0.7),
+            max_tokens: None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait LlmClient: Send + Sync {
+    /// Identifier used for logging / testing.
+    fn provider(&self) -> &'static str;
     async fn complete(&self, prompt: &str, config: &LlmConfig) -> Result<String>;
     async fn chat(&self, messages: &[ChatMessage], config: &LlmConfig) -> Result<String>;
 }
@@ -69,6 +83,9 @@ impl OllamaClient {
 
 #[async_trait]
 impl LlmClient for OllamaClient {
+    fn provider(&self) -> &'static str {
+        "ollama"
+    }
     async fn complete(&self, prompt: &str, config: &LlmConfig) -> Result<String> {
         let url = format!("{}/api/generate", self.base_url.trim_end_matches('/'));
         let body = Self::generate_body(prompt, config);
@@ -155,6 +172,9 @@ impl OpenAiCompatibleClient {
 
 #[async_trait]
 impl LlmClient for OpenAiCompatibleClient {
+    fn provider(&self) -> &'static str {
+        "openai_compatible"
+    }
     async fn complete(&self, prompt: &str, config: &LlmConfig) -> Result<String> {
         let url = format!("{}/v1/completions", self.base_url.trim_end_matches('/'));
         let body = Self::completion_body(prompt, config);

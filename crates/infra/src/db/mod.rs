@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use sqlx::{SqlitePool, migrate::MigrateDatabase, sqlite::SqliteConnectOptions};
 
+mod defaults;
+
 mod repositories;
 
 pub use repositories::{
@@ -42,6 +44,11 @@ impl Vault {
         sqlx::migrate!("./migrations").run(&pool).await?;
 
         Ok(Self { root, pool })
+    }
+
+    /// デフォルトのステータス/リストを投入するヘルパー。
+    pub async fn initialize_defaults(&self) -> Result<()> {
+        defaults::initialize_defaults(&self.pool).await
     }
 
     pub fn task_repo(&self) -> SqliteTaskRepository {

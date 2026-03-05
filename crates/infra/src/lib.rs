@@ -9,6 +9,7 @@ pub mod prelude {
     pub use crate::db::Vault;
     pub use crate::llm::{
         ChatMessage, ChatRole, LlmClient, LlmConfig, OllamaClient, OpenAiCompatibleClient,
+        factory::LlmFactory,
     };
 }
 

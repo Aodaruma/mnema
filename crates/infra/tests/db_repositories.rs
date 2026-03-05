@@ -99,6 +99,24 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn initialize_defaults_creates_statuses_and_lists() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let vault = Vault::connect_or_init(dir.path()).await?;
+    vault.initialize_defaults().await?;
+
+    let status_repo = vault.status_repo();
+    let list_repo = vault.list_repo();
+
+    let statuses = status_repo.list_statuses_for_project(None).await?;
+    assert!(statuses.len() >= 4);
+
+    let system_lists = list_repo.list_system().await?;
+    assert!(system_lists.iter().any(|l| l.kind == ListKind::Inbox));
+    assert!(system_lists.iter().any(|l| l.kind == ListKind::Personal));
+    Ok(())
+}
+
+#[tokio::test]
 async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let vault = Vault::connect_or_init(dir.path()).await?;
