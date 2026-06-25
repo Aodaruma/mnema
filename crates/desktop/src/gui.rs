@@ -14,7 +14,10 @@ use mnema_app::{
     TaskCommandService, UpdateScheduleBlockWindowRequest, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
-use mnema_infra::db::{StorageBackend, Vault};
+use mnema_infra::{
+    db::{StorageBackend, Vault},
+    llm::{ChatMessage, ChatRole, LlmClient, LlmConfig, OllamaClient, OpenAiCompatibleClient},
+};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, Time, macros::format_description};
@@ -682,7 +685,9 @@ impl MnemaGuiApp {
         self.assistant_input.clear();
 
         if asks_next_action(&input) {
-            let response = self.next_action_response();
+            let response = self
+                .assistant_llm_response(&input)
+                .unwrap_or_else(|| self.next_action_response());
             self.assistant_messages.push(AssistantChatMessage {
                 role: "Assistant",
                 content: response,
@@ -701,11 +706,127 @@ impl MnemaGuiApp {
                     });
                 }
             }
-            Err(_) => self.assistant_messages.push(AssistantChatMessage {
-                role: "Assistant",
-                content: "今はタスク作成と次アクション相談に対応しています。例: Write proposal tomorrow 45m".into(),
-            }),
+            Err(_) => {
+                let response = self.assistant_llm_response(&input).unwrap_or_else(|| {
+                    "今はタスク作成と次アクション相談に対応しています。例: Write proposal tomorrow 45m"
+                        .into()
+                });
+                self.assistant_messages.push(AssistantChatMessage {
+                    role: "Assistant",
+                    content: response,
+                });
+            }
         }
+    }
+
+    fn assistant_llm_response(&mut self, input: &str) -> Option<String> {
+        if self.llm_provider == DesktopLlmProvider::Disabled {
+            return None;
+        }
+
+        let provider = self.llm_provider;
+        let ollama_url = self.ollama_url.trim().to_string();
+        let openai_url = self.openai_url.trim().to_string();
+        let model = match provider {
+            DesktopLlmProvider::Disabled => return None,
+            DesktopLlmProvider::Ollama => non_empty_or(&self.routine_model, "llama3.1"),
+            DesktopLlmProvider::OpenAiCompatible => {
+                non_empty_or(&self.routine_model, "gpt-4.1-mini")
+            }
+        };
+        let context = self.assistant_context();
+        let user_input = input.to_string();
+
+        let result = self.runtime.block_on(async move {
+            let config = LlmConfig {
+                model,
+                temperature: Some(0.3),
+                max_tokens: Some(500),
+            };
+            let messages = vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "You are Mnema's concise Japanese task assistant. Help the user decide next actions and keep responses practical. Do not invent saved data.".into(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: format!("Current Mnema context:\n{context}\n\nUser message:\n{user_input}"),
+                },
+            ];
+
+            match provider {
+                DesktopLlmProvider::Disabled => unreachable!(),
+                DesktopLlmProvider::Ollama => {
+                    let client = OllamaClient::new(ollama_url);
+                    client.chat(&messages, &config).await
+                }
+                DesktopLlmProvider::OpenAiCompatible => {
+                    let api_key = std::env::var("MNEMA_OPENAI_API_KEY")
+                        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                        .unwrap_or_default();
+                    let client = OpenAiCompatibleClient::new(openai_url, api_key);
+                    client.chat(&messages, &config).await
+                }
+            }
+        });
+
+        Some(match result {
+            Ok(response) => response,
+            Err(error) => format!("LLM 呼び出しに失敗しました: {error}"),
+        })
+    }
+
+    fn assistant_context(&self) -> String {
+        let tasks = self
+            .tasks
+            .iter()
+            .take(10)
+            .map(|task| {
+                let mut fields = Vec::new();
+                if let Some(due_date) = task.due_date {
+                    fields.push(format!("due {due_date}"));
+                }
+                if let Some(minutes) = task.estimated_minutes {
+                    fields.push(format!("{minutes}m"));
+                }
+                if fields.is_empty() {
+                    format!("- {}", task.title)
+                } else {
+                    format!("- {} ({})", task.title, fields.join(", "))
+                }
+            })
+            .collect::<Vec<_>>();
+        let schedule = self
+            .schedule
+            .iter()
+            .take(10)
+            .map(|block| {
+                format!(
+                    "- {}-{} {} [{}]",
+                    format_hm(block.start_at),
+                    format_hm(block.end_at),
+                    block
+                        .title_snapshot
+                        .as_deref()
+                        .unwrap_or("(untitled block)"),
+                    schedule_state_label(&block.state)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        format!(
+            "Tasks:\n{}\n\nSchedule:\n{}",
+            if tasks.is_empty() {
+                "- none".to_string()
+            } else {
+                tasks.join("\n")
+            },
+            if schedule.is_empty() {
+                "- none".to_string()
+            } else {
+                schedule.join("\n")
+            }
+        )
     }
 
     fn next_action_response(&self) -> String {
@@ -1340,6 +1461,8 @@ impl MnemaGuiApp {
 
     fn show_assistant(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Assistant", palette);
+        ui.label(regular_text(assistant_provider_label(self.llm_provider)).color(palette.muted));
+        ui.add_space(8.0);
         ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
             for message in &self.assistant_messages {
                 ui.group(|ui| {
@@ -2027,6 +2150,23 @@ fn localized_error_message(error: &anyhow::Error) -> String {
         }
         "vault is not connected" => "Vault に接続されていません".to_string(),
         _ => message,
+    }
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn assistant_provider_label(provider: DesktopLlmProvider) -> &'static str {
+    match provider {
+        DesktopLlmProvider::Disabled => "LLM: Off",
+        DesktopLlmProvider::Ollama => "LLM: Ollama",
+        DesktopLlmProvider::OpenAiCompatible => "LLM: OpenAI compatible",
     }
 }
 
