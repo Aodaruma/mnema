@@ -1,12 +1,12 @@
 //! Application services that connect Mnema domain repositories to pure logic.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use mnema_core::prelude::*;
 use mnema_scheduler::{ScheduleIssue, SchedulingOutput};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use time::Date;
+use time::{Date, OffsetDateTime};
 
 pub use mnema_scheduler::{
     AvailabilityWindow, BusyBlock, BusyBlockSource, GreedyScheduler, ProposedScheduleBlock,
@@ -17,6 +17,12 @@ pub use mnema_scheduler::{
 pub enum AppError {
     #[error("repository error: {0}")]
     Repository(String),
+    #[error("missing default inbox list")]
+    MissingDefaultInbox,
+    #[error("missing default task status")]
+    MissingDefaultStatus,
+    #[error("task title is required")]
+    EmptyTaskTitle,
 }
 
 impl From<CoreError> for AppError {
@@ -26,6 +32,80 @@ impl From<CoreError> for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTaskRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub due_date: Option<Date>,
+    pub estimated_minutes: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTaskResult {
+    pub task: Task,
+}
+
+pub struct CaptureTaskService<'a> {
+    tasks: &'a dyn TaskRepository,
+    lists: &'a dyn ListRepository,
+    statuses: &'a dyn StatusRepository,
+}
+
+impl<'a> CaptureTaskService<'a> {
+    #[must_use]
+    pub fn new(
+        tasks: &'a dyn TaskRepository,
+        lists: &'a dyn ListRepository,
+        statuses: &'a dyn StatusRepository,
+    ) -> Self {
+        Self {
+            tasks,
+            lists,
+            statuses,
+        }
+    }
+
+    pub async fn capture_inbox_task(
+        &self,
+        request: CaptureTaskRequest,
+    ) -> AppResult<CaptureTaskResult> {
+        let title = request.title.trim();
+        if title.is_empty() {
+            return Err(AppError::EmptyTaskTitle);
+        }
+
+        let inbox = self
+            .lists
+            .list_system()
+            .await?
+            .into_iter()
+            .find(|list| list.kind == ListKind::Inbox)
+            .ok_or(AppError::MissingDefaultInbox)?;
+        let status_id = default_task_status_id(self.statuses).await?;
+        let now = OffsetDateTime::now_utc();
+        let task = Task {
+            id: TaskId::new(),
+            title: title.to_string(),
+            description: request.description,
+            project_id: None,
+            list_id: Some(inbox.id),
+            status_id,
+            due_date: request.due_date,
+            start_date: None,
+            estimated_minutes: request.estimated_minutes,
+            cost_points: None,
+            dependencies: Vec::new(),
+            milestone_id: None,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+
+        self.tasks.insert(task.clone()).await?;
+        Ok(CaptureTaskResult { task })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanTodayRequest {
@@ -119,6 +199,34 @@ impl<'a> PlanTodayService<'a> {
     }
 }
 
+async fn default_task_status_id(statuses: &dyn StatusRepository) -> AppResult<StatusId> {
+    let groups = statuses.list_groups().await?;
+    let group_kinds = groups
+        .into_iter()
+        .map(|group| (group.id, group.kind))
+        .collect::<HashMap<_, _>>();
+    let statuses = statuses.list_statuses_for_project(None).await?;
+
+    statuses
+        .iter()
+        .find(|status| {
+            matches!(
+                group_kinds.get(&status.group_id),
+                Some(StatusGroupKind::NotStarted)
+            )
+        })
+        .or_else(|| {
+            statuses.iter().find(|status| {
+                !matches!(
+                    group_kinds.get(&status.group_id),
+                    Some(StatusGroupKind::Done)
+                )
+            })
+        })
+        .map(|status| status.id.clone())
+        .ok_or(AppError::MissingDefaultStatus)
+}
+
 fn filter_today_candidates(tasks: Vec<Task>, target_date: Date) -> Vec<Task> {
     tasks
         .into_iter()
@@ -136,6 +244,7 @@ fn filter_today_candidates(tasks: Vec<Task>, target_date: Date) -> Vec<Task> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::Mutex;
     use time::macros::{date, datetime};
 
     #[derive(Default)]
@@ -211,6 +320,79 @@ mod tests {
         }
     }
 
+    struct CapturingTaskRepository {
+        tasks: Mutex<Vec<Task>>,
+    }
+
+    #[async_trait]
+    impl TaskRepository for CapturingTaskRepository {
+        async fn insert(&self, task: Task) -> CoreResult<()> {
+            self.tasks.lock().unwrap().push(task);
+            Ok(())
+        }
+
+        async fn find(&self, id: TaskId) -> CoreResult<Option<Task>> {
+            Ok(self
+                .tasks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|task| task.id == id)
+                .cloned())
+        }
+
+        async fn update(&self, _task: Task) -> CoreResult<()> {
+            unimplemented!("not needed")
+        }
+
+        async fn list_all(&self) -> CoreResult<Vec<Task>> {
+            Ok(self.tasks.lock().unwrap().clone())
+        }
+
+        async fn list_by_project(&self, _project_id: ProjectId) -> CoreResult<Vec<Task>> {
+            unimplemented!("not needed")
+        }
+
+        async fn list_by_list(&self, _list_id: ListId) -> CoreResult<Vec<Task>> {
+            unimplemented!("not needed")
+        }
+
+        async fn soft_delete(
+            &self,
+            _id: TaskId,
+            _deleted_at: time::OffsetDateTime,
+        ) -> CoreResult<()> {
+            unimplemented!("not needed")
+        }
+    }
+
+    struct MemoryListRepository {
+        lists: Vec<List>,
+    }
+
+    #[async_trait]
+    impl ListRepository for MemoryListRepository {
+        async fn insert(&self, _list: List) -> CoreResult<()> {
+            unimplemented!("not needed")
+        }
+
+        async fn find(&self, _id: ListId) -> CoreResult<Option<List>> {
+            unimplemented!("not needed")
+        }
+
+        async fn list_by_project(&self, _project_id: ProjectId) -> CoreResult<Vec<List>> {
+            unimplemented!("not needed")
+        }
+
+        async fn list_system(&self) -> CoreResult<Vec<List>> {
+            Ok(self.lists.clone())
+        }
+
+        async fn update(&self, _list: List) -> CoreResult<()> {
+            unimplemented!("not needed")
+        }
+    }
+
     fn status_catalog() -> (MemoryStatusRepository, StatusId, StatusId) {
         let todo_group = StatusGroup {
             id: StatusGroupId::new(),
@@ -274,6 +456,18 @@ mod tests {
                 datetime!(2026-06-25 10:00 UTC),
             ),
         }]
+    }
+
+    fn inbox_list() -> List {
+        List {
+            id: ListId::new(),
+            project_id: None,
+            name: "Inbox".into(),
+            is_system: true,
+            kind: ListKind::Inbox,
+            view_type: ListViewType::List,
+            order: 0,
+        }
     }
 
     #[tokio::test]
@@ -341,5 +535,55 @@ mod tests {
 
         assert!(result.output.blocks.is_empty());
         assert!(result.output.unscheduled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn captures_task_into_inbox_with_default_status() {
+        let (statuses, todo_status, _) = status_catalog();
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(Vec::new()),
+        };
+        let lists = MemoryListRepository {
+            lists: vec![inbox_list()],
+        };
+        let service = CaptureTaskService::new(&tasks, &lists, &statuses);
+
+        let result = service
+            .capture_inbox_task(CaptureTaskRequest {
+                title: "  Write first task  ".into(),
+                description: None,
+                due_date: Some(date!(2026 - 06 - 25)),
+                estimated_minutes: Some(45),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.task.title, "Write first task");
+        assert_eq!(result.task.status_id, todo_status);
+        assert_eq!(tasks.list_all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_capture_title() {
+        let (statuses, _, _) = status_catalog();
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(Vec::new()),
+        };
+        let lists = MemoryListRepository {
+            lists: vec![inbox_list()],
+        };
+        let service = CaptureTaskService::new(&tasks, &lists, &statuses);
+
+        let err = service
+            .capture_inbox_task(CaptureTaskRequest {
+                title: "   ".into(),
+                description: None,
+                due_date: None,
+                estimated_minutes: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::EmptyTaskTitle));
     }
 }

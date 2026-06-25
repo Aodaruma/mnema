@@ -140,6 +140,14 @@ You can try the scheduler without a database:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+With PostgreSQL configured:
+
+```bash
+cargo run -p mnema-desktop -- add "Write first task" --due 2026-06-25 --minutes 45
+cargo run -p mnema-desktop -- list
+cargo run -p mnema-desktop -- plan
+```
+
 ---
 
 ## Repository layout (planned)

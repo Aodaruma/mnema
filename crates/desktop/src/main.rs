@@ -1,9 +1,10 @@
 use mnema_app::{
-    AvailabilityWindow, BusyBlock, GreedyScheduler, PlanTodayRequest, PlanTodayService,
-    SchedulingInput, TimeWindow,
+    AvailabilityWindow, BusyBlock, CaptureTaskRequest, CaptureTaskService, GreedyScheduler,
+    PlanTodayRequest, PlanTodayService, SchedulingInput, TimeWindow,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::Vault;
+use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
 use time::{
@@ -25,10 +26,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let vault_path = args
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("./vault"));
+    match args.first().map(String::as_str) {
+        Some("add") => run_add(&args[1..]).await,
+        Some("list") => run_list(&args[1..]).await,
+        Some("plan") | None => run_plan(args.get(1..).unwrap_or_default()).await,
+        Some(path) => {
+            let path_args = vec![path.to_string()];
+            run_plan(&path_args).await
+        }
+    }
+}
+
+async fn run_plan(args: &[String]) -> anyhow::Result<()> {
+    let vault_path = vault_path_from_args(args, true);
 
     println!("Vault: {}", vault_path.display());
     let vault = Vault::connect_or_init(&vault_path).await?;
@@ -57,11 +67,81 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_add(args: &[String]) -> anyhow::Result<()> {
+    let title = first_positional_arg(args, &["--due", "--minutes", "--vault"])
+        .ok_or_else(|| anyhow::anyhow!("task title is required"))?;
+    let due_date = optional_date_arg(args, "--due")?;
+    let estimated_minutes = optional_u32_arg(args, "--minutes")?;
+    let vault_path = vault_path_from_args(args, false);
+
+    let vault = Vault::connect_or_init(&vault_path).await?;
+    vault.initialize_defaults().await?;
+    let task_repo = vault.task_repo();
+    let list_repo = vault.list_repo();
+    let status_repo = vault.status_repo();
+    let service = CaptureTaskService::new(&task_repo, &list_repo, &status_repo);
+    let result = service
+        .capture_inbox_task(CaptureTaskRequest {
+            title,
+            description: None,
+            due_date,
+            estimated_minutes,
+        })
+        .await?;
+
+    println!("Added task: {}", result.task.title);
+    if let Some(due_date) = result.task.due_date {
+        println!("Due: {due_date}");
+    }
+    if let Some(minutes) = result.task.estimated_minutes {
+        println!("Estimate: {minutes}m");
+    }
+
+    Ok(())
+}
+
+async fn run_list(args: &[String]) -> anyhow::Result<()> {
+    let vault_path = vault_path_from_args(args, false);
+    let vault = Vault::connect_or_init(&vault_path).await?;
+    vault.initialize_defaults().await?;
+    let task_repo = vault.task_repo();
+    let tasks = task_repo.list_all().await?;
+
+    if tasks.is_empty() {
+        println!("No tasks.");
+        return Ok(());
+    }
+
+    println!("Tasks:");
+    for task in tasks {
+        if task.deleted_at.is_some() {
+            continue;
+        }
+        let mut fields = Vec::new();
+        if let Some(due_date) = task.due_date {
+            fields.push(format!("due {due_date}"));
+        }
+        if let Some(minutes) = task.estimated_minutes {
+            fields.push(format!("{minutes}m"));
+        }
+        let suffix = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", fields.join(", "))
+        };
+        println!("  {}{}", task.title, suffix);
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!("Mnema desktop stub");
     println!();
     println!("Usage:");
-    println!("  mnema-desktop [vault_path]");
+    println!("  mnema-desktop plan [--vault PATH]");
+    println!("  mnema-desktop add \"Task title\" [--due YYYY-MM-DD] [--minutes N] [--vault PATH]");
+    println!("  mnema-desktop list [--vault PATH]");
     println!("  mnema-desktop --demo-plan");
     println!();
     println!("Environment:");
@@ -141,6 +221,61 @@ fn default_workday_availability(date: Date) -> anyhow::Result<Vec<AvailabilityWi
     Ok(vec![AvailabilityWindow {
         window: TimeWindow::new(start, end),
     }])
+}
+
+fn vault_path_from_args(args: &[String], allow_positional: bool) -> PathBuf {
+    option_arg(args, "--vault")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if !allow_positional {
+                return None;
+            }
+            args.iter()
+                .find(|arg| !arg.starts_with("--") && !known_option_value(args, arg))
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from("./vault"))
+}
+
+fn first_positional_arg(args: &[String], options_with_values: &[&str]) -> Option<String> {
+    let mut value_indexes = HashSet::new();
+    for option in options_with_values {
+        if let Some(index) = args.iter().position(|arg| arg == option) {
+            value_indexes.insert(index + 1);
+        }
+    }
+
+    args.iter()
+        .enumerate()
+        .find(|(index, arg)| !arg.starts_with("--") && !value_indexes.contains(index))
+        .map(|(_, arg)| arg.clone())
+}
+
+fn option_arg(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].clone())
+}
+
+fn optional_date_arg(args: &[String], name: &str) -> anyhow::Result<Option<Date>> {
+    option_arg(args, name)
+        .map(|value| Date::parse(&value, format_description!("[year]-[month]-[day]")))
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn optional_u32_arg(args: &[String], name: &str) -> anyhow::Result<Option<u32>> {
+    option_arg(args, name)
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn known_option_value(args: &[String], value: &str) -> bool {
+    ["--due", "--minutes", "--vault"]
+        .iter()
+        .filter_map(|name| option_arg(args, name))
+        .any(|option_value| option_value == value)
 }
 
 fn demo_status_catalog() -> (Vec<Status>, Vec<StatusGroup>, StatusId) {

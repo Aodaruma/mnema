@@ -121,6 +121,14 @@ DB なしでスケジューラのデモを確認する場合:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+PostgreSQL 接続を設定している場合:
+
+```bash
+cargo run -p mnema-desktop -- add "Write first task" --due 2026-06-25 --minutes 45
+cargo run -p mnema-desktop -- list
+cargo run -p mnema-desktop -- plan
+```
+
 ---
 
 ## リポジトリ構成（案）
