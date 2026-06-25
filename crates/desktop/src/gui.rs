@@ -16,6 +16,7 @@ use mnema_app::{
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, macros::format_description};
 use tokio::runtime::Runtime;
 
@@ -70,6 +71,57 @@ const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
 const LOGO_FONT_FAMILY: &str = "mnema_logo";
+const DEFAULT_POSTGRES_URL: &str = "postgres://postgres:postgres@localhost/mnema";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopStorageBackend {
+    Sqlite,
+    Postgres,
+}
+
+impl DesktopStorageBackend {
+    fn from_connected(backend: StorageBackend) -> Self {
+        match backend {
+            StorageBackend::Sqlite => Self::Sqlite,
+            StorageBackend::Postgres => Self::Postgres,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sqlite => "SQLite",
+            Self::Postgres => "PostgreSQL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DesktopConfig {
+    vault_path: String,
+    storage_backend: DesktopStorageBackend,
+    sqlite_path: String,
+    database_url: String,
+    dark_mode: bool,
+}
+
+impl DesktopConfig {
+    fn load(initial_vault_path: PathBuf, default_dark_mode: bool) -> Self {
+        let fallback = Self {
+            vault_path: initial_vault_path.display().to_string(),
+            storage_backend: DesktopStorageBackend::Sqlite,
+            sqlite_path: default_sqlite_path().display().to_string(),
+            database_url: DEFAULT_POSTGRES_URL.to_string(),
+            dark_mode: default_dark_mode,
+        };
+
+        let Ok(bytes) = fs::read(config_path()) else {
+            return fallback;
+        };
+
+        serde_json::from_slice::<Self>(&bytes).unwrap_or(fallback)
+    }
+}
 
 struct NativeMenu {
     root: Menu,
@@ -275,6 +327,9 @@ struct MnemaGuiApp {
     vault_path: String,
     vault: Option<Vault>,
     backend: Option<StorageBackend>,
+    selected_backend: DesktopStorageBackend,
+    sqlite_path: String,
+    database_url: String,
     view: View,
     task_title: String,
     due_date: String,
@@ -292,12 +347,15 @@ struct MnemaGuiApp {
     dark_mode: bool,
     native_menu: Option<NativeMenu>,
     native_menu_synced_dark_mode: Option<bool>,
+    settings_message: String,
 }
 
 impl MnemaGuiApp {
     fn new(cc: &eframe::CreationContext<'_>, initial_vault_path: PathBuf) -> Self {
         configure_fonts(&cc.egui_ctx);
-        let dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
+        let default_dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
+        let config = DesktopConfig::load(initial_vault_path, default_dark_mode);
+        let dark_mode = config.dark_mode;
         configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 }, dark_mode);
         let native_menu = match NativeMenu::install(cc, dark_mode) {
             Ok(menu) => Some(menu),
@@ -312,9 +370,12 @@ impl MnemaGuiApp {
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
         let mut app = Self {
             runtime,
-            vault_path: initial_vault_path.display().to_string(),
+            vault_path: config.vault_path,
             vault: None,
             backend: None,
+            selected_backend: config.storage_backend,
+            sqlite_path: config.sqlite_path,
+            database_url: config.database_url,
             view: View::Today,
             task_title: String::new(),
             due_date: today.clone(),
@@ -332,6 +393,7 @@ impl MnemaGuiApp {
             dark_mode,
             native_menu,
             native_menu_synced_dark_mode,
+            settings_message: String::new(),
         };
         app.connect_and_refresh();
         app
@@ -339,8 +401,18 @@ impl MnemaGuiApp {
 
     fn connect_and_refresh(&mut self) {
         let path = self.normalized_vault_path();
+        let selected_backend = self.selected_backend;
+        let sqlite_path = self.normalized_sqlite_path();
+        let database_url = self.normalized_database_url();
         let result = self.runtime.block_on(async move {
-            let vault = Vault::connect_or_init(&path).await?;
+            let vault = match selected_backend {
+                DesktopStorageBackend::Sqlite => {
+                    Vault::connect_or_init_with_sqlite_path(&path, sqlite_path).await?
+                }
+                DesktopStorageBackend::Postgres => {
+                    Vault::connect_or_init_with_database_url(&path, &database_url).await?
+                }
+            };
             vault.initialize_defaults().await?;
             Result::<Vault>::Ok(vault)
         });
@@ -348,8 +420,10 @@ impl MnemaGuiApp {
         match result {
             Ok(vault) => {
                 self.backend = Some(vault.backend());
+                self.selected_backend = DesktopStorageBackend::from_connected(vault.backend());
                 self.vault = Some(vault);
                 self.message = String::from("Vault connected");
+                self.settings_message = String::from("Connected");
                 self.error = None;
                 self.refresh_tasks();
                 self.refresh_schedule();
@@ -718,6 +792,45 @@ impl MnemaGuiApp {
         }
     }
 
+    fn normalized_sqlite_path(&self) -> PathBuf {
+        let trimmed = self.sqlite_path.trim();
+        if trimmed.is_empty() {
+            default_sqlite_path()
+        } else {
+            PathBuf::from(trimmed)
+        }
+    }
+
+    fn normalized_database_url(&self) -> String {
+        let trimmed = self.database_url.trim();
+        if trimmed.is_empty() {
+            DEFAULT_POSTGRES_URL.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn save_settings(&mut self) {
+        let config = DesktopConfig {
+            vault_path: self.normalized_vault_path().display().to_string(),
+            storage_backend: self.selected_backend,
+            sqlite_path: self.normalized_sqlite_path().display().to_string(),
+            database_url: self.normalized_database_url(),
+            dark_mode: self.dark_mode,
+        };
+
+        match save_config(&config) {
+            Ok(()) => {
+                self.vault_path = config.vault_path;
+                self.sqlite_path = config.sqlite_path;
+                self.database_url = config.database_url;
+                self.settings_message = String::from("Settings saved");
+                self.error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn vault_clone(&mut self) -> Result<Vault> {
         self.vault
             .clone()
@@ -950,19 +1063,64 @@ impl MnemaGuiApp {
 
     fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Settings", palette);
+        egui::Grid::new("settings_grid")
+            .num_columns(2)
+            .spacing([14.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Vault");
+                ui.add_sized(
+                    [520.0, INPUT_HEIGHT],
+                    text_field(&mut self.vault_path, "Vault path"),
+                );
+                ui.end_row();
+
+                ui.label("Backend");
+                ui.horizontal(|ui| {
+                    ui.radio_value(
+                        &mut self.selected_backend,
+                        DesktopStorageBackend::Sqlite,
+                        "SQLite",
+                    );
+                    ui.radio_value(
+                        &mut self.selected_backend,
+                        DesktopStorageBackend::Postgres,
+                        "PostgreSQL",
+                    );
+                });
+                ui.end_row();
+
+                ui.label("SQLite DB");
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [420.0, INPUT_HEIGHT],
+                        text_field(&mut self.sqlite_path, "SQLite database path"),
+                    );
+                    if ui.button("Default").clicked() {
+                        self.sqlite_path = default_sqlite_path().display().to_string();
+                    }
+                });
+                ui.end_row();
+
+                ui.label("PostgreSQL URL");
+                ui.add_sized(
+                    [520.0, INPUT_HEIGHT],
+                    text_field(&mut self.database_url, DEFAULT_POSTGRES_URL),
+                );
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            ui.label("Vault");
-            ui.add_sized(
-                [520.0, INPUT_HEIGHT],
-                text_field(&mut self.vault_path, "Vault path"),
-            );
-            if ui.button("Open").clicked() {
+            if ui.button("Save settings").clicked() {
+                self.save_settings();
+            }
+            if ui.button("Connect").clicked() {
                 self.connect_and_refresh();
             }
         });
         ui.add_space(10.0);
         ui.label(format!(
-            "Backend: {}",
+            "Connected backend: {}",
             self.backend
                 .map(|backend| match backend {
                     StorageBackend::Sqlite => "SQLite",
@@ -970,14 +1128,14 @@ impl MnemaGuiApp {
                 })
                 .unwrap_or("Disconnected")
         ));
-        ui.horizontal(|ui| {
-            ui.label("SQLite path env");
-            ui.monospace("MNEMA_SQLITE_PATH");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Backend env");
-            ui.monospace("MNEMA_STORAGE_BACKEND");
-        });
+        ui.label(format!(
+            "Selected backend: {}",
+            self.selected_backend.label()
+        ));
+        ui.label(format!("Config: {}", config_path().display()));
+        if !self.settings_message.is_empty() {
+            ui.label(regular_text(self.settings_message.as_str()).color(palette.success));
+        }
     }
 
     fn show_task_editor(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -1363,6 +1521,49 @@ fn mix_color(light: Color32, dark: Color32, factor: f32) -> Color32 {
         mix(light.b(), dark.b()),
         mix(light.a(), dark.a()),
     )
+}
+
+fn save_config(config: &DesktopConfig) -> Result<()> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(config)?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(path).join("Mnema").join("config.json");
+    }
+    if let Ok(path) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(path).join("mnema").join("config.json");
+    }
+    if let Ok(path) = std::env::var("HOME") {
+        return PathBuf::from(path)
+            .join(".config")
+            .join("mnema")
+            .join("config.json");
+    }
+    PathBuf::from("./mnema-config.json")
+}
+
+fn default_sqlite_path() -> PathBuf {
+    if let Ok(path) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(path).join("Mnema").join("mnema.sqlite");
+    }
+    if let Ok(path) = std::env::var("XDG_DATA_HOME") {
+        return PathBuf::from(path).join("mnema").join("mnema.sqlite");
+    }
+    if let Ok(path) = std::env::var("HOME") {
+        return PathBuf::from(path)
+            .join(".local")
+            .join("share")
+            .join("mnema")
+            .join("mnema.sqlite");
+    }
+    PathBuf::from("./mnema.sqlite")
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
