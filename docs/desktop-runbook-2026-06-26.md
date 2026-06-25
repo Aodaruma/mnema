@@ -9,8 +9,7 @@
 主に触れる範囲:
 
 - Inbox: quick capture とタスク追加。
-- Today: 今日の候補タスク、計画生成、ScheduleBlock 保存。
-- Today repair: scheduled / done / active / locked block を固定し、proposed block を再提案。
+- Home: 左にタスク、右に agenda。計画生成、ScheduleBlock 保存、現在時刻以降の repair。
 - Projects: Project / List / Milestone の追加と選択、Project Gantt 表示。
 - Schedule: 日別タイムライン、月間 Calendar 表示、ScheduleBlock の状態・時刻編集。
 - Assistant: LLM provider 設定時の簡易相談、またはタスク作成。

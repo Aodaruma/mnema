@@ -7,18 +7,18 @@
 - egui / eframe のデスクトップアプリとして起動できる。
 - SQLite を既定 backend とし、PostgreSQL は任意 backend として残している。
 - Vault path を指定して接続できる。
-- Inbox / Today / Schedule / Assistant / Settings の基本画面がある。
+- Inbox / Home / Schedule / Assistant / Settings の基本画面がある。
 - Projects 画面で Project / List / Milestone を追加・選択できる。
 - Inbox からタスクを追加できる。
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
 - タスク一覧で編集・完了・削除ができる。
-- Today plan を生成し、ScheduleBlock として保存できる。
-- Today repair で scheduled / done / active / locked block を固定し、proposed block を再提案できる。
+- Home で plan を生成し、ScheduleBlock として保存できる。
+- Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block を再提案できる。
 - Schedule は日別タイムラインとして表示できる。
 - Schedule は月間 Calendar 表示へ切り替えられる。
 - Projects は Project Gantt 表示へ切り替えられる。
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
-- Today plan 保存時、既存 proposed blocks を置き換える前に確認できる。
+- Home の plan 保存時、既存 proposed blocks を置き換える前に確認できる。
 - due date / estimate / schedule 時刻は専用 UI で編集できる。
 - Settings で Vault path、SQLite path、PostgreSQL URL、テーマ、LLM 設定を保存できる。
 - Assistant 画面でタスク作成と、設定済み LLM を使った簡易相談ができる。

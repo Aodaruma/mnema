@@ -7,12 +7,12 @@ UI の見直しやフィードバック時に「この画面は何を担当す�
 
 ## 全体像
 
-Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日やることへ落とし込み、Schedule で時間割として確認し、Projects で長期構造を管理する。
+Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日やることへ落とし込み、Schedule で時間割として確認し、Projects で長期構造を管理する。
 
 基本の流れ:
 
 1. Inbox に未整理のタスクを入れる。
-2. Today で今日の候補タスクから実行計画を作る。
+2. Home で今日の候補タスクから実行計画を作る。
 3. Schedule で保存済みの予定ブロックを確認・調整する。
 4. Projects でプロジェクト、リスト、マイルストーンを整理する。
 5. Assistant / Activity / Settings は補助画面として使う。
@@ -39,7 +39,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日�
 
 現在の画面:
 
-- Today
+- Home
 - Inbox
 - Projects
 - Schedule
@@ -65,7 +65,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日�
 
 - Quick capture: 短い文章からタスク名、期限、見積時間を解釈して追加する。
 - Task title / Due / Estimate: 明示的に入力してタスクを追加する。
-- 一覧上の Edit / Done / Delete: 既存タスクを編集、完了、削除する。
+- 一覧上の status / edit / delete: 既存タスクのステータス変更、編集、削除を行う。
 
 この画面に置かないもの:
 
@@ -78,26 +78,28 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日�
 - AI による自動分類はまだ本格実装していない。
 - Project / List / Milestone への直接割り当て UI はまだない。
 
-## Today
+## Home
 
-今日の実行計画を作る場所。
+今日のタスクと agenda を並べて扱う場所。
 
 使う場面:
 
 - 今日やる候補タスクを確認する。
-- Plan で今日の予定案を作る。
-- Save で予定案を ScheduleBlock として保存する。
-- 予定が崩れた時に Repair from 以降を再提案する。
+- 左側でタスクを確認・編集する。
+- 右側の agenda で1日の時間割を見る。
+- Plan で agenda に予定案を作る。
+- Save plan で予定案を ScheduleBlock として保存する。
+- 現在時刻ライン右端の repair アイコンから、現在時刻以降を再提案する。
 
 主な操作:
 
-- Date: 対象日を切り替える。
-- Plan: 対象日のタスクから予定案を作る。まだ保存はしない。
-- Save: 表示中の予定案を proposed ScheduleBlock として保存する。
-- Repair from: その時刻以降の予定を再計画する開始時刻。
-- Repair: scheduled / done / active / locked block を固定し、残りを再提案する。
-- Save repair: repair 結果を proposed ScheduleBlock として保存する。
-- Tasks: 今日の判断材料になるタスク一覧を編集する。
+- Tasks: 左パネルのタスク一覧。status icon、所属、タスク名、期限、見積を表示する。
+- status icon: クリックして status を選ぶ。Done 系 status を選ぶと完了扱いになる。
+- edit / delete icon: ホバー時に明るくなり、delete は確認後に実行する。
+- Agenda date: 右パネル上部で対象日を切り替える。
+- Plan: 対象日のタスクから agenda に予定案を作る。まだ保存はしない。
+- Save plan: 表示中の予定案を proposed ScheduleBlock として保存する。
+- Repair icon: 現在時刻ライン右端のアイコン。hover で強調され、クリックすると現在時刻以降を repair する。
 
 この画面に置かないもの:
 
@@ -108,7 +110,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日�
 現状の制限:
 
 - availability は現時点では既定の 9:00-17:00 を使う。
-- Repair は proposed block の置き換えが中心で、差分レビュー UI はまだない。
+- Repair は agenda 上に再提案を出す。差分レビュー UI はまだない。
 - 外部カレンダー予定はまだ取り込んでいない。
 
 ## Schedule
@@ -117,7 +119,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Today で今日�
 
 使う場面:
 
-- Today で保存した予定案を時間割として見る。
+- Home で保存した予定案を時間割として見る。
 - proposed block を scheduled / done / cancelled に変える。
 - 開始・終了時刻を手動で調整する。
 - 月間 Calendar で予定密度を俯瞰する。
@@ -252,7 +254,7 @@ ScheduleBlock の状態:
 
 - その画面で何をすればよいか一目で分かるか。
 - 入力欄の意味、単位、必須/任意が分かるか。
-- Today と Schedule の役割が混ざって見えないか。
+- Home と Schedule の役割が混ざって見えないか。
 - Inbox と Projects の役割が混ざって見えないか。
 - Calendar / Gantt が「見るだけ」なのか「編集できる」のか誤解しないか。
 - Assistant がどこまで実行してよいのか分かるか。
