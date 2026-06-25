@@ -44,7 +44,7 @@ pub fn run_gui(initial_vault_path: PathBuf) -> Result<()> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
-    Today,
+    Home,
     Inbox,
     Projects,
     Schedule,
@@ -68,8 +68,10 @@ enum ProjectViewMode {
 #[derive(Debug, Clone)]
 enum TaskAction {
     Edit(TaskId),
-    Complete(TaskId),
-    Delete(TaskId),
+    SetStatus(TaskId, StatusId),
+    RequestDelete(TaskId),
+    ConfirmDelete(TaskId),
+    CancelDelete,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +173,7 @@ struct NativeMenu {
     root: Menu,
     refresh: MenuItem,
     close: MenuItem,
-    today: MenuItem,
+    home: MenuItem,
     inbox: MenuItem,
     projects: MenuItem,
     schedule: MenuItem,
@@ -222,7 +224,7 @@ impl NativeMenu {
             ],
         )?;
 
-        let today = MenuItem::with_id("mnema.view.today", "&Today", true, None);
+        let home = MenuItem::with_id("mnema.view.home", "&Home", true, None);
         let inbox = MenuItem::with_id("mnema.view.inbox", "&Inbox", true, None);
         let projects = MenuItem::with_id("mnema.view.projects", "&Projects", true, None);
         let schedule = MenuItem::with_id("mnema.view.schedule", "&Schedule", true, None);
@@ -238,7 +240,7 @@ impl NativeMenu {
             "&View",
             true,
             &[
-                &today,
+                &home,
                 &inbox,
                 &projects,
                 &schedule,
@@ -259,7 +261,7 @@ impl NativeMenu {
             root,
             refresh,
             close,
-            today,
+            home,
             inbox,
             projects,
             schedule,
@@ -316,8 +318,8 @@ impl NativeMenu {
             Some(MenuAction::Refresh)
         } else if id == self.close.id().as_ref() {
             Some(MenuAction::Close)
-        } else if id == self.today.id().as_ref() {
-            Some(MenuAction::SetView(View::Today))
+        } else if id == self.home.id().as_ref() {
+            Some(MenuAction::SetView(View::Home))
         } else if id == self.inbox.id().as_ref() {
             Some(MenuAction::SetView(View::Inbox))
         } else if id == self.projects.id().as_ref() {
@@ -412,11 +414,14 @@ struct MnemaGuiApp {
     schedule_edit_start: String,
     schedule_edit_end: String,
     confirm_plan_save: bool,
-    confirm_repair_save: bool,
     target_date: String,
     repair_from_time: String,
     schedule_view_mode: ScheduleViewMode,
     tasks: Vec<Task>,
+    lists: Vec<List>,
+    statuses: Vec<Status>,
+    status_groups: Vec<StatusGroup>,
+    confirming_delete_task_id: Option<TaskId>,
     projects: Vec<Project>,
     selected_project_id: Option<ProjectId>,
     project_lists: Vec<List>,
@@ -472,7 +477,7 @@ impl MnemaGuiApp {
             openai_url: config.openai_url,
             planning_model: config.planning_model,
             routine_model: config.routine_model,
-            view: View::Today,
+            view: View::Home,
             task_title: String::new(),
             quick_capture: String::new(),
             assistant_input: String::new(),
@@ -492,11 +497,14 @@ impl MnemaGuiApp {
             schedule_edit_start: String::new(),
             schedule_edit_end: String::new(),
             confirm_plan_save: false,
-            confirm_repair_save: false,
             target_date: today.clone(),
             repair_from_time: current_time,
             schedule_view_mode: ScheduleViewMode::Day,
             tasks: Vec::new(),
+            lists: Vec::new(),
+            statuses: Vec::new(),
+            status_groups: Vec::new(),
+            confirming_delete_task_id: None,
             projects: Vec::new(),
             selected_project_id: None,
             project_lists: Vec::new(),
@@ -551,6 +559,7 @@ impl MnemaGuiApp {
                 self.error = None;
                 self.refresh_tasks();
                 self.refresh_projects();
+                self.refresh_task_context();
                 self.refresh_schedule();
                 self.refresh_schedule_month();
                 self.refresh_automation_logs();
@@ -612,6 +621,60 @@ impl MnemaGuiApp {
         }
     }
 
+    fn refresh_task_context(&mut self) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let project_ids = self
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect::<Vec<_>>();
+
+        let result = self.runtime.block_on(async move {
+            let list_repo = vault.list_repo();
+            let status_repo = vault.status_repo();
+            let mut lists = list_repo.list_system().await?;
+            for project_id in &project_ids {
+                lists.extend(list_repo.list_by_project(project_id.clone()).await?);
+            }
+            lists.sort_by(|left, right| left.name.cmp(&right.name));
+
+            let status_groups = status_repo.list_groups().await?;
+            let mut statuses = status_repo.list_statuses_for_project(None).await?;
+            for project_id in project_ids {
+                statuses.extend(
+                    status_repo
+                        .list_statuses_for_project(Some(project_id))
+                        .await?,
+                );
+            }
+            statuses.sort_by(|left, right| {
+                left.project_id
+                    .is_some()
+                    .cmp(&right.project_id.is_some())
+                    .then_with(|| left.order.cmp(&right.order))
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+
+            Result::<(Vec<List>, Vec<Status>, Vec<StatusGroup>)>::Ok((
+                lists,
+                statuses,
+                status_groups,
+            ))
+        });
+
+        match result {
+            Ok((lists, statuses, status_groups)) => {
+                self.lists = lists;
+                self.statuses = statuses;
+                self.status_groups = status_groups;
+                self.error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn refresh_project_children(&mut self) {
         let Some(project_id) = self.selected_project_id.clone() else {
             self.project_lists.clear();
@@ -642,27 +705,30 @@ impl MnemaGuiApp {
         }
     }
 
-    fn complete_task(&mut self, task_id: TaskId) {
+    fn update_task_status(&mut self, task_id: TaskId, status_id: StatusId) {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
-        let completed_task_id = task_id.clone();
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
-            let status_repo = vault.status_repo();
-            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
-            Result::<Task>::Ok(service.complete_task(task_id).await?)
+            let mut task = task_repo
+                .find(task_id)
+                .await?
+                .filter(|task| task.deleted_at.is_none())
+                .ok_or_else(|| anyhow!("task not found"))?;
+            task.status_id = status_id;
+            task.updated_at = OffsetDateTime::now_utc();
+            task_repo.update(task.clone()).await?;
+            Result::<Task>::Ok(task)
         });
 
         match result {
             Ok(task) => {
-                self.message = format!("Completed: {}", task.title);
+                self.message = format!("Updated status: {}", task.title);
                 self.error = None;
-                if self.editing_task_id.as_ref() == Some(&completed_task_id) {
-                    self.clear_task_editor();
-                }
                 self.refresh_tasks();
                 self.refresh_schedule();
+                self.refresh_schedule_month();
             }
             Err(error) => self.set_error(error),
         }
@@ -698,8 +764,15 @@ impl MnemaGuiApp {
     fn handle_task_action(&mut self, action: TaskAction) {
         match action {
             TaskAction::Edit(task_id) => self.start_edit_task(task_id),
-            TaskAction::Complete(task_id) => self.complete_task(task_id),
-            TaskAction::Delete(task_id) => self.delete_task(task_id),
+            TaskAction::SetStatus(task_id, status_id) => {
+                self.update_task_status(task_id, status_id)
+            }
+            TaskAction::RequestDelete(task_id) => self.confirming_delete_task_id = Some(task_id),
+            TaskAction::ConfirmDelete(task_id) => {
+                self.confirming_delete_task_id = None;
+                self.delete_task(task_id);
+            }
+            TaskAction::CancelDelete => self.confirming_delete_task_id = None,
         }
     }
 
@@ -1301,6 +1374,7 @@ impl MnemaGuiApp {
                 self.project_end_date.clear();
                 self.selected_project_id = Some(project_id);
                 self.refresh_projects();
+                self.refresh_task_context();
             }
             Err(error) => self.set_error(error),
         }
@@ -1339,6 +1413,7 @@ impl MnemaGuiApp {
                 self.message = format!("List added: {}", list.name);
                 self.project_list_name.clear();
                 self.refresh_project_children();
+                self.refresh_task_context();
             }
             Err(error) => self.set_error(error),
         }
@@ -1461,7 +1536,6 @@ impl MnemaGuiApp {
             .any(|block| block.state == ScheduleBlockState::Proposed);
         if has_replaceable_proposed {
             self.confirm_plan_save = true;
-            self.confirm_repair_save = false;
             self.message = String::from("Save will replace existing proposed blocks.");
         } else {
             self.plan_today(true);
@@ -1538,21 +1612,6 @@ impl MnemaGuiApp {
                 }
             }
             Err(error) => self.set_error(error),
-        }
-    }
-
-    fn request_save_repair(&mut self) {
-        self.refresh_schedule();
-        let has_replaceable_proposed = self
-            .schedule
-            .iter()
-            .any(|block| block.state == ScheduleBlockState::Proposed);
-        if has_replaceable_proposed {
-            self.confirm_repair_save = true;
-            self.confirm_plan_save = false;
-            self.message = String::from("Repair save will replace existing proposed blocks.");
-        } else {
-            self.repair_schedule(true);
         }
     }
 
@@ -1658,6 +1717,8 @@ impl MnemaGuiApp {
         match action {
             MenuAction::Refresh => {
                 self.refresh_tasks();
+                self.refresh_projects();
+                self.refresh_task_context();
                 self.refresh_schedule();
                 self.refresh_schedule_month();
             }
@@ -1705,6 +1766,7 @@ impl eframe::App for MnemaGuiApp {
                     if ui.button("Refresh").clicked() {
                         self.refresh_tasks();
                         self.refresh_projects();
+                        self.refresh_task_context();
                         self.refresh_schedule();
                         self.refresh_schedule_month();
                         self.refresh_automation_logs();
@@ -1728,7 +1790,7 @@ impl eframe::App for MnemaGuiApp {
             .exact_size(168.0)
             .show_inside(ui, |ui| {
                 ui.add_space(12.0);
-                nav_button(ui, &mut self.view, View::Today, "Today");
+                nav_button(ui, &mut self.view, View::Home, "Home");
                 nav_button(ui, &mut self.view, View::Inbox, "Inbox");
                 nav_button(ui, &mut self.view, View::Projects, "Projects");
                 nav_button(ui, &mut self.view, View::Schedule, "Schedule");
@@ -1749,7 +1811,7 @@ impl eframe::App for MnemaGuiApp {
         });
 
         egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
-            View::Today => self.show_today(ui, palette),
+            View::Home => self.show_home(ui, palette),
             View::Inbox => self.show_inbox(ui, palette),
             View::Projects => self.show_projects(ui, palette),
             View::Schedule => self.show_schedule(ui, palette),
@@ -1761,83 +1823,97 @@ impl eframe::App for MnemaGuiApp {
 }
 
 impl MnemaGuiApp {
-    fn show_today(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Today", palette);
-        ui.horizontal(|ui| {
-            ui.label("Date");
-            date_editor(ui, &mut self.target_date);
-            if ui.button("Plan").clicked() {
-                self.plan_today(false);
-            }
-            if ui.button("Save").clicked() {
-                self.request_save_plan();
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Repair from");
-            time_editor(ui, &mut self.repair_from_time);
-            if ui.button("Repair").clicked() {
-                self.repair_schedule(false);
-            }
-            if ui.button("Save repair").clicked() {
-                self.request_save_repair();
-            }
-        });
-        if self.confirm_plan_save {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    palette.warning,
-                    "Existing proposed blocks for this date will be replaced.",
-                );
-                if ui.button("Replace proposed").clicked() {
-                    self.confirm_plan_save = false;
-                    self.plan_today(true);
+    fn show_home(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Home", palette);
+        let mut task_action = None;
+        let mut plan = false;
+        let mut save_plan = false;
+        let mut confirm_replace_plan = false;
+        let mut cancel_plan_save = false;
+        let mut repair_from_now = false;
+        let mut home_date_changed = false;
+
+        ui.columns(2, |columns| {
+            columns[0].label(bold_text("Tasks").color(palette.section));
+            columns[0].add_space(6.0);
+            task_action = task_list(
+                &mut columns[0],
+                "home_tasks",
+                &self.tasks,
+                &self.statuses,
+                &self.status_groups,
+                &self.lists,
+                &self.projects,
+                self.confirming_delete_task_id.as_ref(),
+                palette,
+            );
+            self.show_task_editor(&mut columns[0], palette);
+
+            columns[1].horizontal(|ui| {
+                ui.label(bold_text("Agenda").color(palette.section));
+                ui.add_space(12.0);
+                if date_editor(ui, &mut self.target_date) {
+                    home_date_changed = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    self.confirm_plan_save = false;
-                    self.message = String::from("Save cancelled");
+                if ui.button("Plan").clicked() {
+                    plan = true;
+                }
+                if self.plan.is_some() && ui.button("Save plan").clicked() {
+                    save_plan = true;
                 }
             });
-        }
-        if self.confirm_repair_save {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    palette.warning,
-                    "Repair will replace existing proposed blocks for this date.",
-                );
-                if ui.button("Replace with repair").clicked() {
-                    self.confirm_repair_save = false;
-                    self.repair_schedule(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    self.confirm_repair_save = false;
-                    self.message = String::from("Repair save cancelled");
-                }
-            });
-        }
-        ui.add_space(12.0);
 
-        if let Some(plan) = &self.plan {
-            if !plan.output.issues.is_empty() {
-                ui.colored_label(
-                    palette.warning,
-                    format!("Issues: {}", plan.output.issues.len()),
-                );
+            if self.confirm_plan_save {
+                columns[1].horizontal(|ui| {
+                    ui.colored_label(
+                        palette.warning,
+                        "Existing proposed blocks for this date will be replaced.",
+                    );
+                    if ui.button("Replace").clicked() {
+                        confirm_replace_plan = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel_plan_save = true;
+                    }
+                });
             }
-            if !plan.output.unscheduled.is_empty() {
-                ui.label(format!("Unscheduled: {}", plan.output.unscheduled.len()));
-            }
-            block_list(ui, &plan.output.blocks);
-        } else {
-            ui.label("No plan yet.");
-        }
+            columns[1].add_space(8.0);
+            let target_date = parse_required_date(&self.target_date)
+                .unwrap_or_else(|_| OffsetDateTime::now_utc().date());
+            repair_from_now = home_agenda_view(
+                &mut columns[1],
+                target_date,
+                self.plan.as_ref(),
+                &self.schedule,
+                palette,
+            );
+        });
 
-        ui.separator();
-        ui.label(bold_text("Tasks"));
-        if let Some(action) = task_list(ui, &self.tasks, palette) {
+        if let Some(action) = task_action {
             self.handle_task_action(action);
         }
-        self.show_task_editor(ui, palette);
+        if home_date_changed {
+            self.plan = None;
+            self.refresh_schedule();
+        }
+        if plan {
+            self.plan_today(false);
+        }
+        if save_plan {
+            self.request_save_plan();
+        }
+        if confirm_replace_plan {
+            self.confirm_plan_save = false;
+            self.plan_today(true);
+        }
+        if cancel_plan_save {
+            self.confirm_plan_save = false;
+            self.message = String::from("Save cancelled");
+        }
+        if repair_from_now {
+            self.repair_from_time = format_hm(OffsetDateTime::now_utc());
+            self.repair_schedule(false);
+        }
     }
 
     fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -1869,7 +1945,17 @@ impl MnemaGuiApp {
             }
         });
         ui.add_space(12.0);
-        if let Some(action) = task_list(ui, &self.tasks, palette) {
+        if let Some(action) = task_list(
+            ui,
+            "inbox_tasks",
+            &self.tasks,
+            &self.statuses,
+            &self.status_groups,
+            &self.lists,
+            &self.projects,
+            self.confirming_delete_task_id.as_ref(),
+            palette,
+        ) {
             self.handle_task_action(action);
         }
         self.show_task_editor(ui, palette);
@@ -1879,15 +1965,18 @@ impl MnemaGuiApp {
         section_header(ui, "Assistant", palette);
         ui.label(regular_text(assistant_provider_label(self.llm_provider)).color(palette.muted));
         ui.add_space(8.0);
-        ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-            for message in &self.assistant_messages {
-                ui.group(|ui| {
-                    ui.label(bold_text(message.role).color(palette.section));
-                    ui.label(message.content.as_str());
-                });
-                ui.add_space(8.0);
-            }
-        });
+        ScrollArea::vertical()
+            .id_salt("assistant_messages")
+            .max_height(480.0)
+            .show(ui, |ui| {
+                for message in &self.assistant_messages {
+                    ui.group(|ui| {
+                        ui.label(bold_text(message.role).color(palette.section));
+                        ui.label(message.content.as_str());
+                    });
+                    ui.add_space(8.0);
+                }
+            });
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -1945,6 +2034,7 @@ impl MnemaGuiApp {
             columns[0].label(bold_text("Projects").color(palette.section));
             columns[0].add_space(6.0);
             ScrollArea::vertical()
+                .id_salt("project_list")
                 .max_height(520.0)
                 .show(&mut columns[0], |ui| {
                     for project in &self.projects {
@@ -2061,23 +2151,25 @@ impl MnemaGuiApp {
             return;
         }
 
-        ScrollArea::vertical().show(ui, |ui| {
-            for log in &self.automation_logs {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(bold_text(automation_action_label(&log.action_type)));
-                        ui.label(regular_text(format_hm(log.created_at)).color(palette.muted));
+        ScrollArea::vertical()
+            .id_salt("activity_logs")
+            .show(ui, |ui| {
+                for log in &self.automation_logs {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(bold_text(automation_action_label(&log.action_type)));
+                            ui.label(regular_text(format_hm(log.created_at)).color(palette.muted));
+                        });
+                        if let Some(title) = automation_log_title(log) {
+                            ui.label(title);
+                        }
+                        if let Some(explanation) = &log.explanation {
+                            ui.label(regular_text(explanation.as_str()).color(palette.muted));
+                        }
                     });
-                    if let Some(title) = automation_log_title(log) {
-                        ui.label(title);
-                    }
-                    if let Some(explanation) = &log.explanation {
-                        ui.label(regular_text(explanation.as_str()).color(palette.muted));
-                    }
-                });
-                ui.add_space(8.0);
-            }
-        });
+                    ui.add_space(8.0);
+                }
+            });
     }
 
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -2619,17 +2711,23 @@ fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a
         .vertical_align(Align::Center)
 }
 
-fn date_editor(ui: &mut egui::Ui, value: &mut String) {
-    ui.add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"));
+fn date_editor(ui: &mut egui::Ui, value: &mut String) -> bool {
+    let mut changed = ui
+        .add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"))
+        .changed();
     if ui.button("‹").clicked() {
         shift_date(value, -1);
+        changed = true;
     }
     if ui.button("Today").clicked() {
         *value = OffsetDateTime::now_utc().date().to_string();
+        changed = true;
     }
     if ui.button("›").clicked() {
         shift_date(value, 1);
+        changed = true;
     }
+    changed
 }
 
 fn shift_date(value: &mut String, days: i64) {
@@ -2830,61 +2928,450 @@ fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
     ui.add_space(8.0);
 }
 
-fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) -> Option<TaskAction> {
+fn task_list(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    tasks: &[Task],
+    statuses: &[Status],
+    status_groups: &[StatusGroup],
+    lists: &[List],
+    projects: &[Project],
+    confirming_delete_task_id: Option<&TaskId>,
+    palette: Palette,
+) -> Option<TaskAction> {
     if tasks.is_empty() {
         ui.label("No tasks.");
         return None;
     }
 
     let mut action = None;
-    ScrollArea::vertical().show(ui, |ui| {
-        for task in tasks {
-            ui.horizontal(|ui| {
-                ui.label(bold_text(task.title.as_str()));
-                if let Some(due_date) = task.due_date {
-                    ui.label(regular_text(format!("due {due_date}")).color(palette.due));
-                }
-                if let Some(minutes) = task.estimated_minutes {
-                    ui.label(format!("{minutes}m"));
-                }
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Delete").clicked() {
-                        action = Some(TaskAction::Delete(task.id.clone()));
-                    }
-                    if ui.button("Done").clicked() {
-                        action = Some(TaskAction::Complete(task.id.clone()));
-                    }
-                    if ui.button("Edit").clicked() {
-                        action = Some(TaskAction::Edit(task.id.clone()));
-                    }
-                });
-            });
-            ui.separator();
-        }
-    });
+    ScrollArea::vertical()
+        .id_salt(id_salt)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for task in tasks {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 62.0),
+                    egui::Layout::left_to_right(Align::Center),
+                    |ui| {
+                        task_status_combo(
+                            ui,
+                            id_salt,
+                            task,
+                            statuses,
+                            status_groups,
+                            palette,
+                            &mut action,
+                        );
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                regular_text(task_context_line(task, lists, projects))
+                                    .size(11.0)
+                                    .color(palette.muted),
+                            );
+                            ui.label(bold_text(task.title.as_str()).color(palette.text));
+                            ui.horizontal(|ui| {
+                                if let Some(due_date) = task.due_date {
+                                    ui.label(
+                                        regular_text(format!("due {due_date}"))
+                                            .size(12.0)
+                                            .color(palette.due),
+                                    );
+                                }
+                                if let Some(minutes) = task.estimated_minutes {
+                                    ui.label(
+                                        regular_text(format!("{minutes} min"))
+                                            .size(12.0)
+                                            .color(palette.muted),
+                                    );
+                                }
+                            });
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            let confirming = confirming_delete_task_id == Some(&task.id);
+                            if confirming {
+                                if subtle_icon_button(ui, "✓", "Confirm delete", palette).clicked()
+                                {
+                                    action = Some(TaskAction::ConfirmDelete(task.id.clone()));
+                                }
+                                if subtle_icon_button(ui, "×", "Cancel delete", palette).clicked()
+                                {
+                                    action = Some(TaskAction::CancelDelete);
+                                }
+                                ui.label(regular_text("Delete?").color(palette.warning));
+                            } else {
+                                if subtle_icon_button(ui, "×", "Delete", palette).clicked() {
+                                    action = Some(TaskAction::RequestDelete(task.id.clone()));
+                                }
+                                if subtle_icon_button(ui, "✎", "Edit", palette).clicked() {
+                                    action = Some(TaskAction::Edit(task.id.clone()));
+                                }
+                            }
+                        });
+                    },
+                );
+                ui.separator();
+            }
+        });
     action
 }
 
-fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
-    if blocks.is_empty() {
-        ui.label("No scheduled blocks.");
+fn task_status_combo(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    task: &Task,
+    statuses: &[Status],
+    status_groups: &[StatusGroup],
+    palette: Palette,
+    action: &mut Option<TaskAction>,
+) {
+    let current_status = statuses.iter().find(|status| status.id == task.status_id);
+    let current_kind = current_status
+        .and_then(|status| status_group_kind(status, status_groups))
+        .unwrap_or(StatusGroupKind::NotStarted);
+    let selected_text = status_icon(&current_kind);
+    let candidates = status_candidates(statuses, task.project_id.as_ref());
+
+    egui::ComboBox::from_id_salt((id_salt, "status", task.id.clone()))
+        .selected_text(
+            RichText::new(selected_text)
+                .size(18.0)
+                .color(palette.accent),
+        )
+        .width(36.0)
+        .show_ui(ui, |ui| {
+            for status in candidates {
+                let kind =
+                    status_group_kind(status, status_groups).unwrap_or(StatusGroupKind::NotStarted);
+                let label = format!("{} {}", status_icon(&kind), status.name);
+                if ui
+                    .selectable_label(status.id == task.status_id, label)
+                    .clicked()
+                {
+                    *action = Some(TaskAction::SetStatus(task.id.clone(), status.id.clone()));
+                }
+            }
+        });
+}
+
+fn status_candidates<'a>(
+    statuses: &'a [Status],
+    project_id: Option<&ProjectId>,
+) -> Vec<&'a Status> {
+    let mut candidates = statuses
+        .iter()
+        .filter(|status| status.project_id.as_ref() == project_id)
+        .collect::<Vec<_>>();
+    if project_id.is_some() {
+        candidates.extend(statuses.iter().filter(|status| status.project_id.is_none()));
+    }
+    candidates.sort_by_key(|status| status.order);
+    candidates
+}
+
+fn status_group_kind(status: &Status, status_groups: &[StatusGroup]) -> Option<StatusGroupKind> {
+    status_groups
+        .iter()
+        .find(|group| group.id == status.group_id)
+        .map(|group| group.kind.clone())
+}
+
+fn status_icon(kind: &StatusGroupKind) -> &'static str {
+    match kind {
+        StatusGroupKind::NotStarted => "○",
+        StatusGroupKind::InProgress => "◐",
+        StatusGroupKind::Pending => "…",
+        StatusGroupKind::Done => "✓",
+    }
+}
+
+fn task_context_line(task: &Task, lists: &[List], projects: &[Project]) -> String {
+    let list = task
+        .list_id
+        .as_ref()
+        .and_then(|list_id| lists.iter().find(|list| &list.id == list_id))
+        .map(|list| list.name.as_str());
+    let project = task
+        .project_id
+        .as_ref()
+        .and_then(|project_id| projects.iter().find(|project| &project.id == project_id))
+        .map(|project| project.title.as_str());
+
+    match (project, list) {
+        (Some(project), Some(list)) => format!("{project} / {list}"),
+        (Some(project), None) => project.to_string(),
+        (None, Some(list)) => list.to_string(),
+        (None, None) => "Inbox".to_string(),
+    }
+}
+
+fn subtle_icon_button(
+    ui: &mut egui::Ui,
+    icon: &'static str,
+    hover_text: &'static str,
+    palette: Palette,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let color = if response.hovered() {
+        palette.text
+    } else {
+        Color32::from_rgba_unmultiplied(
+            palette.muted.r(),
+            palette.muted.g(),
+            palette.muted.b(),
+            150,
+        )
+    };
+    if response.hovered() {
+        ui.painter()
+            .circle_filled(rect.center(), 13.0, palette.faint);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        color,
+    );
+    response.on_hover_text(hover_text)
+}
+
+fn home_agenda_view(
+    ui: &mut egui::Ui,
+    target_date: Date,
+    plan: Option<&PlanTodayResult>,
+    schedule: &[ScheduleBlock],
+    palette: Palette,
+) -> bool {
+    let proposed_blocks = plan
+        .filter(|plan| plan.target_date == target_date)
+        .map(|plan| plan.output.blocks.as_slice());
+    let mut repair_clicked = false;
+
+    if let Some(plan) = plan.filter(|plan| plan.target_date == target_date) {
+        ui.horizontal(|ui| {
+            ui.label(
+                regular_text(format!("{} proposed", plan.output.blocks.len())).color(palette.muted),
+            );
+            if !plan.output.unscheduled.is_empty() {
+                ui.label(
+                    regular_text(format!("{} unscheduled", plan.output.unscheduled.len()))
+                        .color(palette.warning),
+                );
+            }
+            if !plan.output.issues.is_empty() {
+                ui.label(
+                    regular_text(format!("{} issues", plan.output.issues.len()))
+                        .color(palette.warning),
+                );
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    ScrollArea::vertical()
+        .id_salt("home_agenda")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let day_start = match target_date.with_hms(0, 0, 0) {
+                Ok(value) => value.assume_utc(),
+                Err(_) => return,
+            };
+            let day_end = day_start + time::Duration::days(1);
+            let total_minutes = (day_end - day_start).whole_minutes() as f32;
+            let width = ui.available_width().max(420.0);
+            let height = 24.0 * 72.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect(
+                rect,
+                8.0,
+                palette.surface,
+                Stroke::new(1.0, palette.border),
+                egui::StrokeKind::Inside,
+            );
+
+            draw_agenda_hour_grid(
+                &painter,
+                rect,
+                target_date,
+                day_start,
+                total_minutes,
+                palette,
+            );
+
+            if let Some(blocks) = proposed_blocks {
+                for block in blocks {
+                    draw_proposed_agenda_block(
+                        &painter,
+                        rect,
+                        day_start,
+                        total_minutes,
+                        block,
+                        palette,
+                    );
+                }
+            } else {
+                for block in schedule {
+                    draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
+                }
+            }
+
+            if draw_current_time_repair(
+                ui,
+                &painter,
+                rect,
+                target_date,
+                day_start,
+                total_minutes,
+                palette,
+            ) {
+                repair_clicked = true;
+            }
+        });
+
+    repair_clicked
+}
+
+fn draw_agenda_hour_grid(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    target_date: Date,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    palette: Palette,
+) {
+    let label_width = 58.0;
+    let content_left = rect.left() + label_width;
+    let content_right = rect.right() - 10.0;
+    let pixels_per_minute = rect.height() / total_minutes;
+
+    for hour in 0..=24 {
+        let mark = if hour == 24 {
+            day_start + time::Duration::days(1)
+        } else {
+            match target_date.with_hms(hour, 0, 0) {
+                Ok(value) => value.assume_utc(),
+                Err(_) => continue,
+            }
+        };
+        let y = rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
+        painter.text(
+            egui::pos2(rect.left() + 10.0, y),
+            egui::Align2::LEFT_CENTER,
+            format!("{hour:02}:00"),
+            egui::FontId::proportional(12.0),
+            palette.muted,
+        );
+        painter.line_segment(
+            [egui::pos2(content_left, y), egui::pos2(content_right, y)],
+            Stroke::new(1.0, palette.faint),
+        );
+    }
+}
+
+fn draw_proposed_agenda_block(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    block: &ProposedScheduleBlock,
+    palette: Palette,
+) {
+    let label_width = 58.0;
+    let left = rect.left() + label_width + 10.0;
+    let right = rect.right() - 12.0;
+    let pixels_per_minute = rect.height() / total_minutes;
+    let start_minutes = (block.window.start - day_start).whole_minutes() as f32;
+    let end_minutes = (block.window.end - day_start).whole_minutes() as f32;
+    let top = rect
+        .top()
+        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
+    let bottom = rect
+        .bottom()
+        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
+    if bottom <= top {
         return;
     }
 
-    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-        for block in blocks {
-            ui.horizontal(|ui| {
-                ui.monospace(format!(
-                    "{}-{}",
-                    format_hm(block.window.start),
-                    format_hm(block.window.end)
-                ));
-                ui.label(bold_text(block.title.as_str()));
-                ui.label(format!("{}m", block.required_minutes));
-            });
-            ui.separator();
-        }
-    });
+    let block_rect = egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(right, bottom.max(top + 30.0)),
+    );
+    painter.rect(
+        block_rect,
+        6.0,
+        palette.selected_fill,
+        Stroke::new(1.0, palette.accent),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        block_rect.left_top() + egui::vec2(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{}-{}  {}  {}m",
+            format_hm(block.window.start),
+            format_hm(block.window.end),
+            block.title,
+            block.required_minutes
+        ),
+        egui::FontId::proportional(13.0),
+        palette.text,
+    );
+}
+
+fn draw_current_time_repair(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    target_date: Date,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    palette: Palette,
+) -> bool {
+    let now = OffsetDateTime::now_utc();
+    if now.date() != target_date {
+        return false;
+    }
+
+    let label_width = 58.0;
+    let content_left = rect.left() + label_width;
+    let icon_center_x = rect.right() - 24.0;
+    let y =
+        rect.top() + ((now - day_start).whole_minutes() as f32 * (rect.height() / total_minutes));
+    if y < rect.top() || y > rect.bottom() {
+        return false;
+    }
+
+    painter.line_segment(
+        [
+            egui::pos2(content_left, y),
+            egui::pos2(icon_center_x - 14.0, y),
+        ],
+        Stroke::new(1.5, palette.warning),
+    );
+
+    let icon_rect =
+        egui::Rect::from_center_size(egui::pos2(icon_center_x, y), egui::vec2(34.0, 34.0));
+    let response = ui
+        .interact(
+            icon_rect,
+            ui.make_persistent_id("home_repair_now"),
+            egui::Sense::click(),
+        )
+        .on_hover_text("Repair?");
+    let radius = if response.hovered() { 13.0 } else { 9.0 };
+    painter.circle_filled(icon_rect.center(), radius, palette.warning);
+    painter.text(
+        icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "↻",
+        egui::FontId::proportional(if response.hovered() { 18.0 } else { 14.0 }),
+        palette.surface,
+    );
+
+    response.clicked()
 }
 
 fn project_gantt_view(
@@ -2916,55 +3403,58 @@ fn project_gantt_view(
     });
     ui.add_space(8.0);
 
-    ScrollArea::both().max_height(560.0).show(ui, |ui| {
-        draw_gantt_axis(
-            ui,
-            range_start,
-            range_end,
-            label_width,
-            timeline_width,
-            palette,
-        );
-        ui.add_space(4.0);
+    ScrollArea::both()
+        .id_salt("project_gantt")
+        .max_height(560.0)
+        .show(ui, |ui| {
+            draw_gantt_axis(
+                ui,
+                range_start,
+                range_end,
+                label_width,
+                timeline_width,
+                palette,
+            );
+            ui.add_space(4.0);
 
-        for project in projects {
-            ui.horizontal(|ui| {
-                let is_selected = selected_project_id == Some(&project.id);
-                if ui
-                    .add_sized(
-                        [label_width, 32.0],
-                        egui::Button::selectable(is_selected, project.title.as_str()),
-                    )
-                    .clicked()
-                {
-                    selected = Some(project.id.clone());
-                }
+            for project in projects {
+                ui.horizontal(|ui| {
+                    let is_selected = selected_project_id == Some(&project.id);
+                    if ui
+                        .add_sized(
+                            [label_width, 32.0],
+                            egui::Button::selectable(is_selected, project.title.as_str()),
+                        )
+                        .clicked()
+                    {
+                        selected = Some(project.id.clone());
+                    }
 
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(timeline_width, row_height),
-                    egui::Sense::click(),
-                );
-                draw_gantt_project_row(
-                    ui.painter(),
-                    rect,
-                    project,
-                    if is_selected {
-                        selected_milestones
-                    } else {
-                        &[]
-                    },
-                    range_start,
-                    range_end,
-                    is_selected,
-                    palette,
-                );
-                if response.clicked() {
-                    selected = Some(project.id.clone());
-                }
-            });
-            ui.add_space(5.0);
-        }
-    });
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(timeline_width, row_height),
+                        egui::Sense::click(),
+                    );
+                    draw_gantt_project_row(
+                        ui.painter(),
+                        rect,
+                        project,
+                        if is_selected {
+                            selected_milestones
+                        } else {
+                            &[]
+                        },
+                        range_start,
+                        range_end,
+                        is_selected,
+                        palette,
+                    );
+                    if response.clicked() {
+                        selected = Some(project.id.clone());
+                    }
+                });
+                ui.add_space(5.0);
+            }
+        });
 
     selected
 }
@@ -3376,50 +3866,54 @@ fn schedule_timeline(
     let height = (total_minutes * 1.15).clamp(420.0, 960.0);
     let width = (ui.available_width() - 260.0).clamp(420.0, 760.0);
 
-    ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect(
-            rect,
-            8.0,
-            palette.surface,
-            Stroke::new(1.0, palette.border),
-            egui::StrokeKind::Inside,
-        );
+    ScrollArea::vertical()
+        .id_salt("schedule_timeline")
+        .max_height(560.0)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect(
+                rect,
+                8.0,
+                palette.surface,
+                Stroke::new(1.0, palette.border),
+                egui::StrokeKind::Inside,
+            );
 
-        let label_width = 58.0;
-        let content_left = rect.left() + label_width;
-        let content_right = rect.right() - 10.0;
-        let pixels_per_minute = rect.height() / total_minutes;
-        let mut hour = day_start.hour();
-        let end_hour = day_end.hour();
+            let label_width = 58.0;
+            let content_left = rect.left() + label_width;
+            let content_right = rect.right() - 10.0;
+            let pixels_per_minute = rect.height() / total_minutes;
+            let mut hour = day_start.hour();
+            let end_hour = day_end.hour();
 
-        while hour <= end_hour {
-            let Ok(mark) = target_date.with_hms(hour, 0, 0) else {
-                break;
-            };
-            let mark = mark.assume_utc();
-            let y = rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
-            if rect.contains(egui::pos2(content_left, y)) {
-                painter.text(
-                    egui::pos2(rect.left() + 10.0, y),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{hour:02}:00"),
-                    egui::FontId::proportional(12.0),
-                    palette.muted,
-                );
-                painter.line_segment(
-                    [egui::pos2(content_left, y), egui::pos2(content_right, y)],
-                    Stroke::new(1.0, palette.faint),
-                );
+            while hour <= end_hour {
+                let Ok(mark) = target_date.with_hms(hour, 0, 0) else {
+                    break;
+                };
+                let mark = mark.assume_utc();
+                let y =
+                    rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
+                if rect.contains(egui::pos2(content_left, y)) {
+                    painter.text(
+                        egui::pos2(rect.left() + 10.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{hour:02}:00"),
+                        egui::FontId::proportional(12.0),
+                        palette.muted,
+                    );
+                    painter.line_segment(
+                        [egui::pos2(content_left, y), egui::pos2(content_right, y)],
+                        Stroke::new(1.0, palette.faint),
+                    );
+                }
+                hour += 1;
             }
-            hour += 1;
-        }
 
-        for block in blocks {
-            draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
-        }
-    });
+            for block in blocks {
+                draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
+            }
+        });
 }
 
 fn draw_schedule_block(
@@ -3491,60 +3985,62 @@ fn schedule_action_panel(
         |ui| {
             ui.label(bold_text("Blocks").color(palette.section));
             ui.add_space(6.0);
-            ScrollArea::vertical().show(ui, |ui| {
-                for block in blocks {
-                    ui.group(|ui| {
-                        ui.label(bold_text(
-                            block
-                                .title_snapshot
-                                .as_deref()
-                                .unwrap_or("(untitled block)"),
-                        ));
-                        ui.horizontal(|ui| {
-                            ui.monospace(format!(
-                                "{}-{}",
-                                format_hm(block.start_at),
-                                format_hm(block.end_at)
+            ScrollArea::vertical()
+                .id_salt("schedule_action_panel")
+                .show(ui, |ui| {
+                    for block in blocks {
+                        ui.group(|ui| {
+                            ui.label(bold_text(
+                                block
+                                    .title_snapshot
+                                    .as_deref()
+                                    .unwrap_or("(untitled block)"),
                             ));
-                            ui.label(format!("{}m", schedule_block_minutes(block)));
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!(
+                                    "{}-{}",
+                                    format_hm(block.start_at),
+                                    format_hm(block.end_at)
+                                ));
+                                ui.label(format!("{}m", schedule_block_minutes(block)));
+                            });
+                            ui.label(
+                                regular_text(schedule_state_label(&block.state))
+                                    .color(schedule_state_text_color(&block.state, palette)),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Edit").clicked() {
+                                    action = Some(ScheduleAction::Edit(block.id.clone()));
+                                }
+                                if block.state == ScheduleBlockState::Proposed
+                                    && ui.button("Schedule").clicked()
+                                {
+                                    action = Some(ScheduleAction::SetState(
+                                        block.id.clone(),
+                                        ScheduleBlockState::Scheduled,
+                                    ));
+                                }
+                                if block.state != ScheduleBlockState::Done
+                                    && ui.button("Done").clicked()
+                                {
+                                    action = Some(ScheduleAction::SetState(
+                                        block.id.clone(),
+                                        ScheduleBlockState::Done,
+                                    ));
+                                }
+                                if block.state != ScheduleBlockState::Cancelled
+                                    && ui.button("Cancel").clicked()
+                                {
+                                    action = Some(ScheduleAction::SetState(
+                                        block.id.clone(),
+                                        ScheduleBlockState::Cancelled,
+                                    ));
+                                }
+                            });
                         });
-                        ui.label(
-                            regular_text(schedule_state_label(&block.state))
-                                .color(schedule_state_text_color(&block.state, palette)),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Edit").clicked() {
-                                action = Some(ScheduleAction::Edit(block.id.clone()));
-                            }
-                            if block.state == ScheduleBlockState::Proposed
-                                && ui.button("Schedule").clicked()
-                            {
-                                action = Some(ScheduleAction::SetState(
-                                    block.id.clone(),
-                                    ScheduleBlockState::Scheduled,
-                                ));
-                            }
-                            if block.state != ScheduleBlockState::Done
-                                && ui.button("Done").clicked()
-                            {
-                                action = Some(ScheduleAction::SetState(
-                                    block.id.clone(),
-                                    ScheduleBlockState::Done,
-                                ));
-                            }
-                            if block.state != ScheduleBlockState::Cancelled
-                                && ui.button("Cancel").clicked()
-                            {
-                                action = Some(ScheduleAction::SetState(
-                                    block.id.clone(),
-                                    ScheduleBlockState::Cancelled,
-                                ));
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-                }
-            });
+                        ui.add_space(8.0);
+                    }
+                });
         },
     );
     action
