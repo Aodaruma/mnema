@@ -603,7 +603,7 @@ impl MnemaGuiApp {
         };
         let title = self.edit_title.trim().to_string();
         if title.is_empty() {
-            self.set_error(anyhow!("task title is required"));
+            self.set_error(anyhow!("タスク名を入力してください"));
             return;
         }
         let due_date = match parse_optional_date(&self.edit_due_date) {
@@ -867,7 +867,7 @@ impl MnemaGuiApp {
     fn add_task(&mut self) {
         let title = self.task_title.trim().to_string();
         if title.is_empty() {
-            self.set_error(anyhow!("task title is required"));
+            self.set_error(anyhow!("タスク名を入力してください"));
             return;
         }
 
@@ -1097,7 +1097,7 @@ impl MnemaGuiApp {
     }
 
     fn set_error(&mut self, error: anyhow::Error) {
-        self.error = Some(error.to_string());
+        self.error = Some(localized_error_message(&error));
     }
 
     fn handle_native_menu(&mut self, ctx: &egui::Context) {
@@ -1222,10 +1222,7 @@ impl MnemaGuiApp {
         section_header(ui, "Today", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
-            ui.add_sized(
-                [128.0, INPUT_HEIGHT],
-                text_field(&mut self.target_date, "YYYY-MM-DD"),
-            );
+            date_editor(ui, &mut self.target_date);
             if ui.button("Plan").clicked() {
                 self.plan_today(false);
             }
@@ -1295,15 +1292,9 @@ impl MnemaGuiApp {
                 text_field(&mut self.task_title, "Task title"),
             );
             ui.label("Due");
-            ui.add_sized(
-                [128.0, INPUT_HEIGHT],
-                text_field(&mut self.due_date, "YYYY-MM-DD"),
-            );
+            date_editor(ui, &mut self.due_date);
             ui.label("Estimate");
-            ui.add_sized(
-                [84.0, INPUT_HEIGHT],
-                text_field(&mut self.minutes, "minutes"),
-            );
+            minutes_editor(ui, &mut self.minutes);
             if ui.button("Add").clicked() {
                 self.add_task();
             }
@@ -1342,10 +1333,7 @@ impl MnemaGuiApp {
         section_header(ui, "Schedule", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
-            ui.add_sized(
-                [128.0, INPUT_HEIGHT],
-                text_field(&mut self.target_date, "YYYY-MM-DD"),
-            );
+            date_editor(ui, &mut self.target_date);
             if ui.button("Load").clicked() {
                 self.refresh_schedule();
             }
@@ -1504,15 +1492,9 @@ impl MnemaGuiApp {
                 text_field(&mut self.edit_title, "Task title"),
             );
             ui.label("Due");
-            ui.add_sized(
-                [128.0, INPUT_HEIGHT],
-                text_field(&mut self.edit_due_date, "YYYY-MM-DD"),
-            );
+            date_editor(ui, &mut self.edit_due_date);
             ui.label("Estimate");
-            ui.add_sized(
-                [84.0, INPUT_HEIGHT],
-                text_field(&mut self.edit_minutes, "minutes"),
-            );
+            minutes_editor(ui, &mut self.edit_minutes);
             if ui.button("Save").clicked() {
                 save = true;
             }
@@ -1540,15 +1522,9 @@ impl MnemaGuiApp {
         let mut cancel = false;
         ui.horizontal(|ui| {
             ui.label("Start");
-            ui.add_sized(
-                [84.0, INPUT_HEIGHT],
-                text_field(&mut self.schedule_edit_start, "HH:MM"),
-            );
+            time_editor(ui, &mut self.schedule_edit_start);
             ui.label("End");
-            ui.add_sized(
-                [84.0, INPUT_HEIGHT],
-                text_field(&mut self.schedule_edit_end, "HH:MM"),
-            );
+            time_editor(ui, &mut self.schedule_edit_end);
             if ui.button("Save").clicked() {
                 save = true;
             }
@@ -1793,7 +1769,7 @@ fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
             let rect = ui.max_rect();
             ui.painter().rect(
                 rect,
-                18.0,
+                16.0,
                 palette.switch_bg,
                 Stroke::new(1.0, palette.border),
                 egui::StrokeKind::Inside,
@@ -1823,11 +1799,11 @@ fn theme_icon_button(
     } else {
         palette.text
     });
-    let mut button = egui::Button::selectable(selected, text).corner_radius(14.0);
+    let mut button = egui::Button::selectable(selected, text).corner_radius(16.0);
     if selected {
         button = button.fill(palette.selected_fill);
     }
-    ui.add_sized([31.0, 28.0], button).on_hover_text(hover_text)
+    ui.add_sized([30.0, 30.0], button).on_hover_text(hover_text)
 }
 
 fn regular_text(text: impl Into<String>) -> RichText {
@@ -1851,6 +1827,71 @@ fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a
     TextEdit::singleline(value)
         .hint_text(hint_text)
         .vertical_align(Align::Center)
+}
+
+fn date_editor(ui: &mut egui::Ui, value: &mut String) {
+    ui.add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"));
+    if ui.button("‹").clicked() {
+        shift_date(value, -1);
+    }
+    if ui.button("Today").clicked() {
+        *value = OffsetDateTime::now_utc().date().to_string();
+    }
+    if ui.button("›").clicked() {
+        shift_date(value, 1);
+    }
+}
+
+fn shift_date(value: &mut String, days: i64) {
+    let base = parse_optional_date(value)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| OffsetDateTime::now_utc().date());
+    let shifted = if days < 0 {
+        base.previous_day().unwrap_or(base)
+    } else {
+        base.next_day().unwrap_or(base)
+    };
+    *value = shifted.to_string();
+}
+
+fn minutes_editor(ui: &mut egui::Ui, value: &mut String) {
+    let mut minutes = value.trim().parse::<u32>().unwrap_or(0);
+    let response = ui.add_sized(
+        [92.0, INPUT_HEIGHT],
+        egui::DragValue::new(&mut minutes)
+            .range(0..=24 * 60)
+            .speed(5)
+            .suffix(" min"),
+    );
+    if response.changed() {
+        *value = minutes.to_string();
+    }
+    if ui.button("Clear").clicked() {
+        value.clear();
+    }
+}
+
+fn time_editor(ui: &mut egui::Ui, value: &mut String) {
+    ui.add_sized([74.0, INPUT_HEIGHT], text_field(value, "HH:MM"));
+    if ui.button("-15").clicked() {
+        shift_time(value, -15);
+    }
+    if ui.button("+15").clicked() {
+        shift_time(value, 15);
+    }
+}
+
+fn shift_time(value: &mut String, minutes: i64) {
+    let Ok(time) = Time::parse(value.trim(), format_description!("[hour]:[minute]")) else {
+        return;
+    };
+    let date = OffsetDateTime::now_utc().date();
+    let shifted = date
+        .with_time(time)
+        .assume_utc()
+        .saturating_add(time::Duration::minutes(minutes));
+    *value = format_hm(shifted);
 }
 
 fn themed_visuals(palette: Palette, dark_mode: bool) -> egui::Visuals {
@@ -1907,6 +1948,20 @@ fn mix_color(light: Color32, dark: Color32, factor: f32) -> Color32 {
         mix(light.b(), dark.b()),
         mix(light.a(), dark.a()),
     )
+}
+
+fn localized_error_message(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    match message.as_str() {
+        "task title is required" => "タスク名を入力してください".to_string(),
+        "task not found" => "タスクが見つかりません".to_string(),
+        "schedule block not found" => "予定ブロックが見つかりません".to_string(),
+        "schedule block end must be after start" => {
+            "終了時刻は開始時刻より後にしてください".to_string()
+        }
+        "vault is not connected" => "Vault に接続されていません".to_string(),
+        _ => message,
+    }
 }
 
 fn save_config(config: &DesktopConfig) -> Result<()> {
@@ -2303,11 +2358,13 @@ fn parse_optional_date(value: &str) -> Result<Option<Date>> {
 }
 
 fn parse_required_date(value: &str) -> Result<Date> {
-    Date::parse(value.trim(), format_description!("[year]-[month]-[day]")).map_err(Into::into)
+    Date::parse(value.trim(), format_description!("[year]-[month]-[day]"))
+        .map_err(|_| anyhow!("日付は YYYY-MM-DD で入力してください"))
 }
 
 fn parse_hm_for_date(value: &str, date: Date) -> Result<OffsetDateTime> {
-    let time = Time::parse(value.trim(), format_description!("[hour]:[minute]"))?;
+    let time = Time::parse(value.trim(), format_description!("[hour]:[minute]"))
+        .map_err(|_| anyhow!("時刻は HH:MM で入力してください"))?;
     Ok(date.with_time(time).assume_utc())
 }
 
@@ -2316,14 +2373,17 @@ fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
     if value.is_empty() {
         Ok(None)
     } else {
-        value.parse::<u32>().map(Some).map_err(Into::into)
+        value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| anyhow!("見積分数は数値で入力してください"))
     }
 }
 
 fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(anyhow!("task title is required"));
+        return Err(anyhow!("タスク名を入力してください"));
     }
 
     let tokens = value.split_whitespace().collect::<Vec<_>>();
@@ -2352,7 +2412,7 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
 
         if matches!(normalized.as_str(), "/due" | "due") {
             let Some(raw_due) = tokens.get(index + 1) else {
-                return Err(anyhow!("due date is missing"));
+                return Err(anyhow!("期限日を入力してください"));
             };
             due_date = Some(parse_required_date(raw_due)?);
             index += 2;
@@ -2370,9 +2430,13 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
 
         if matches!(normalized.as_str(), "/m" | "/minutes" | "minutes") {
             let Some(raw_minutes) = tokens.get(index + 1) else {
-                return Err(anyhow!("minutes value is missing"));
+                return Err(anyhow!("見積分数を入力してください"));
             };
-            estimated_minutes = Some(raw_minutes.parse::<u32>()?);
+            estimated_minutes = Some(
+                raw_minutes
+                    .parse::<u32>()
+                    .map_err(|_| anyhow!("見積分数は数値で入力してください"))?,
+            );
             index += 2;
             continue;
         }
@@ -2389,7 +2453,7 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
 
     let title = title_tokens.join(" ").trim().to_string();
     if title.is_empty() {
-        return Err(anyhow!("task title is required"));
+        return Err(anyhow!("タスク名を入力してください"));
     }
 
     Ok(CaptureTaskRequest {
