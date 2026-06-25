@@ -11,15 +11,10 @@ fn today() -> Date {
     utc_now().date()
 }
 
-async fn test_vault() -> anyhow::Result<Option<Vault>> {
-    let Ok(database_url) = std::env::var("MNEMA_TEST_DATABASE_URL") else {
-        eprintln!("skipping PostgreSQL integration test: MNEMA_TEST_DATABASE_URL is not set");
-        return Ok(None);
-    };
+async fn test_vault() -> anyhow::Result<Vault> {
     let dir = tempdir()?;
-    Vault::connect_or_init_with_database_url(dir.path(), &database_url)
-        .await
-        .map(Some)
+    let sqlite_path = dir.path().join("mnema-test.sqlite");
+    Vault::connect_or_init_with_sqlite_path(dir.path(), sqlite_path).await
 }
 
 async fn default_status(vault: &Vault) -> anyhow::Result<Status> {
@@ -33,9 +28,7 @@ async fn default_status(vault: &Vault) -> anyhow::Result<Status> {
 
 #[tokio::test]
 async fn task_crud_roundtrip() -> anyhow::Result<()> {
-    let Some(vault) = test_vault().await? else {
-        return Ok(());
-    };
+    let vault = test_vault().await?;
 
     let status = default_status(&vault).await?;
 
@@ -101,9 +94,7 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn initialize_defaults_creates_statuses_and_lists() -> anyhow::Result<()> {
-    let Some(vault) = test_vault().await? else {
-        return Ok(());
-    };
+    let vault = test_vault().await?;
     vault.initialize_defaults().await?;
 
     let status_repo = vault.status_repo();
@@ -120,9 +111,7 @@ async fn initialize_defaults_creates_statuses_and_lists() -> anyhow::Result<()> 
 
 #[tokio::test]
 async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
-    let Some(vault) = test_vault().await? else {
-        return Ok(());
-    };
+    let vault = test_vault().await?;
     let repo = vault.user_settings_repo();
 
     let mut settings = UserSettings::default();
@@ -147,9 +136,7 @@ async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn schedule_block_replace_and_list_for_day() -> anyhow::Result<()> {
-    let Some(vault) = test_vault().await? else {
-        return Ok(());
-    };
+    let vault = test_vault().await?;
     let repo = vault.schedule_block_repo();
     let target_date = today();
     let start_at = target_date.with_hms(9, 0, 0)?.assume_utc();

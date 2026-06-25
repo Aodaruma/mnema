@@ -20,9 +20,10 @@ async-trait = { workspace = true }
 # 非同期ランタイム
 tokio = { version = "1.48", features = ["full"] }
 
-# DB (PostgreSQL)
+# DB (SQLite local-first by default, PostgreSQL optional)
 sqlx = { version = "0.8.6", features = [
     "postgres",
+    "sqlite",
     "runtime-tokio-rustls",
     "macros",
     "migrate",

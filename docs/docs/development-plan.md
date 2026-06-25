@@ -131,13 +131,13 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 ### 4.1 目的
 
 * `core` のモデルを永続化するための DB レイヤを作る。
-* Vault ディレクトリ構造（`config.json`, `memory/*.md`, `attachments/`, `exports/` など）と PostgreSQL 接続方針を決める。
+* Vault ディレクトリ構造（`config.json`, `memory/*.md`, `attachments/`, `exports/` など）と SQLite / PostgreSQL 接続方針を決める。
 
 ### 4.2 やること
 
 * [ ] `infra` crate 内に `db` モジュールを作成
 
-* [x] PostgreSQL + `sqlx` を採用
+* [x] SQLite 既定 + PostgreSQL 任意 backend + `sqlx` を採用
 
 * [ ] マイグレーションファイルの仕組みを整える
 
@@ -148,11 +148,11 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
   * `ListRepository`
   * `MilestoneRepository`
 
-* [ ] Vault パスと `MNEMA_DATABASE_URL` を受け取って DB / ファイル群を初期化する関数を用意
+* [ ] Vault パス、`MNEMA_SQLITE_PATH`、`MNEMA_DATABASE_URL` を受け取って DB / ファイル群を初期化する関数を用意
 
 ### 4.3 AI に投げるときのサンプルプロンプト
 
-> In the `crates/infra` crate, create a `db` module that uses PostgreSQL via sqlx to persist the core domain models (`Task`, `Project`, etc.). Define repository traits in `crates/core` (e.g. `TaskRepository`) and provide concrete implementations in `crates/infra`. Also, design a simple `Vault` struct that knows the root directory for files and reads the database URL from `MNEMA_DATABASE_URL`.
+> In the `crates/infra` crate, create a `db` module that uses SQLite by default and PostgreSQL optionally via sqlx to persist the core domain models (`Task`, `Project`, etc.). Define repository traits in `crates/core` (e.g. `TaskRepository`) and provide concrete implementations in `crates/infra`. Also, design a simple `Vault` struct that knows the root directory for files and reads backend configuration from `MNEMA_STORAGE_BACKEND`, `MNEMA_SQLITE_PATH`, and `MNEMA_DATABASE_URL`.
 
 ---
 

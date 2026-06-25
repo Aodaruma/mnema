@@ -49,7 +49,7 @@ async fn run_plan(args: &[String]) -> anyhow::Result<()> {
     let target_date = OffsetDateTime::now_utc().date();
     let task_repo = vault.task_repo();
     let status_repo = vault.status_repo();
-    let service = PlanTodayService::new(&task_repo, &status_repo);
+    let service = PlanTodayService::new(task_repo.as_ref(), status_repo.as_ref());
     let result = service
         .plan_today(PlanTodayRequest {
             target_date,
@@ -61,7 +61,7 @@ async fn run_plan(args: &[String]) -> anyhow::Result<()> {
     print_plan("Today plan", result.target_date, &result.output.blocks);
     if save {
         let schedule_block_repo = vault.schedule_block_repo();
-        let store = SchedulePlanStoreService::new(&schedule_block_repo);
+        let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
         let saved = store.save_proposed_plan(&result).await?;
         println!("Saved proposed schedule blocks: {}", saved.len());
     }
@@ -81,7 +81,7 @@ async fn run_schedule(args: &[String]) -> anyhow::Result<()> {
     let target_date =
         optional_date_arg(args, "--date")?.unwrap_or_else(|| OffsetDateTime::now_utc().date());
     let schedule_block_repo = vault.schedule_block_repo();
-    let store = SchedulePlanStoreService::new(&schedule_block_repo);
+    let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
     let blocks = store.list_for_day(target_date).await?;
 
     print_saved_schedule("Saved schedule", target_date, &blocks);
@@ -100,7 +100,8 @@ async fn run_add(args: &[String]) -> anyhow::Result<()> {
     let task_repo = vault.task_repo();
     let list_repo = vault.list_repo();
     let status_repo = vault.status_repo();
-    let service = CaptureTaskService::new(&task_repo, &list_repo, &status_repo);
+    let service =
+        CaptureTaskService::new(task_repo.as_ref(), list_repo.as_ref(), status_repo.as_ref());
     let result = service
         .capture_inbox_task(CaptureTaskRequest {
             title,
@@ -167,7 +168,9 @@ fn print_help() {
     println!("  mnema-desktop --demo-plan");
     println!();
     println!("Environment:");
-    println!("  MNEMA_DATABASE_URL      PostgreSQL connection string");
+    println!("  MNEMA_STORAGE_BACKEND   sqlite or postgres (default: sqlite)");
+    println!("  MNEMA_SQLITE_PATH       SQLite DB path override");
+    println!("  MNEMA_DATABASE_URL      PostgreSQL connection string when backend=postgres");
 }
 
 fn run_demo_plan() {

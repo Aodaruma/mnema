@@ -41,9 +41,11 @@ Conceptually, Mnema sits somewhere between:
 
 * Vaults live on your machine (in a directory like `./mnema-vault/`).
 * Sync is **optional**, not required (similar to Obsidian Sync vs. local vault).
-* PostgreSQL is the source of truth for tasks and structure, while the vault
-  directory still stores project notes, user preferences, assets, and exports so
-  file-based data stays portable and readable.
+* SQLite is the default source of truth for tasks and structure so the app can
+  run locally without Docker or a database install. The vault directory still
+  stores project notes, user preferences, assets, and exports so file-based data
+  stays portable and readable.
+* PostgreSQL remains an optional backend for self-hosted/server-style setups.
 
 ### AI as a secretary, not a boss
 
@@ -104,8 +106,9 @@ Mnema tries to **reduce** friction, not add more:
 
 * **Language**: Rust (core logic and backend)
 * **Desktop Shell**: TBD (Tauri is the current favorite; still evaluating)
-* **Storage**: PostgreSQL via `MNEMA_DATABASE_URL`, plus a local vault folder for
-  files, assets, exports, and app-local configuration
+* **Storage**: SQLite by default, optional PostgreSQL via
+  `MNEMA_STORAGE_BACKEND=postgres` and `MNEMA_DATABASE_URL`, plus a local vault
+  folder for files, assets, exports, and app-local configuration
 * **LLM layer**:
 
   * pluggable providers (local via Ollama, cloud via OpenAI-compatible APIs)
@@ -123,16 +126,27 @@ Mnema tries to **reduce** friction, not add more:
 
 ## Database
 
-Mnema expects a PostgreSQL connection string in `MNEMA_DATABASE_URL`.
+Mnema uses SQLite by default. No Docker or PostgreSQL install is required for the
+local app flow.
 
-If unset, development builds try:
+The SQLite database is stored outside the vault by default to avoid sync-folder
+file locking issues:
 
-```text
-postgres://postgres:postgres@localhost/mnema
+* Windows: `%LOCALAPPDATA%\Mnema\mnema.sqlite`
+* Linux/macOS-style fallback: `$XDG_DATA_HOME/mnema/mnema.sqlite` or
+  `$HOME/.local/share/mnema/mnema.sqlite`
+
+You can override it with `MNEMA_SQLITE_PATH`.
+
+PostgreSQL is optional:
+
+```bash
+export MNEMA_STORAGE_BACKEND=postgres
+export MNEMA_DATABASE_URL=postgres://postgres:postgres@localhost/mnema
 ```
 
-Integration tests use `MNEMA_TEST_DATABASE_URL` when it is set; otherwise the
-database-backed tests exit without touching a database.
+If `MNEMA_DATABASE_URL` is unset in PostgreSQL mode, development builds try
+`postgres://postgres:postgres@localhost/mnema`.
 
 You can try the scheduler without a database:
 
@@ -140,7 +154,7 @@ You can try the scheduler without a database:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
-With PostgreSQL configured:
+With the default SQLite backend:
 
 ```bash
 cargo run -p mnema-desktop -- add "Write first task" --due 2026-06-25 --minutes 45

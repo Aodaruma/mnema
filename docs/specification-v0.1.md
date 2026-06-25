@@ -33,7 +33,7 @@
 
 - データの正本はローカルに置く
 - 「Vault」という単位で世界観を管理
-- 1 Vault = 1 フォルダ + その中の DB / 設定 / アセット
+- 1 Vault = 1 フォルダ + 設定 / アセット / エクスポート。構造化DBは既定では Vault 外の local app data に置く。
 
 ### 2.2 Vault 構造（案）
 
@@ -44,12 +44,13 @@
   - `attachments/`（添付ファイル）
   - `exports/`（JSON / Markdown などのエクスポート）
 
-構造化データの正本は PostgreSQL に置く。接続先は `MNEMA_DATABASE_URL` で指定し、
+構造化データの正本は既定では SQLite に置く。SQLite DB は Dropbox / Google Drive などの同期フォルダによるファイルロックを避けるため、Vault 内ではなく OS の local app data 配下に置く。
+PostgreSQL は self-hosted / server 運用向けの任意 backend として残し、`MNEMA_STORAGE_BACKEND=postgres` と `MNEMA_DATABASE_URL` で指定する。
 Vault は添付・エクスポート・秘書アセット・ローカル設定などのファイル置き場として維持する。
 
 ### 2.3 ロックインしない方針
 
-- PostgreSQL を使いつつも、定期的に JSON / Markdown にエクスポート
+- SQLite / PostgreSQL のどちらを使っていても、定期的に JSON / Markdown にエクスポート
 - 最悪アプリが動かなくても、エクスポートからタスク・プロジェクトを復元できる構造を目指す
 
 ------
@@ -330,7 +331,7 @@ Vault は添付・エクスポート・秘書アセット・ローカル設定�
 - domain 層
   - Task / Project / List / Milestone / Assistant などのビジネスロジック
 - infrastructure 層
-  - DB（PostgreSQL）、ファイルストレージ、同期クライアント、LLM クライアント
+  - DB（SQLite / PostgreSQL）、ファイルストレージ、同期クライアント、LLM クライアント
 - scheduler 層
   - タスク・空き時間・busy block から決定的にスケジュール案を生成
   - LLM には依存せず、同じ入力から同じ出力を返す
@@ -360,14 +361,16 @@ Vault は添付・エクスポート・秘書アセット・ローカル設定�
 
 ### 5.2 データ永続化
 
-- v1: PostgreSQL + `sqlx`
+- v1: SQLite 既定 + PostgreSQL 任意 backend + `sqlx`
   - 理由
+    - ローカルアプリ単体で触る場合に Docker / PostgreSQL インストールを不要にできる
+    - SQLite DB を Vault 外に置くことで同期フォルダ由来のファイルロックを避けやすい
     - 将来の同期・サーバー化・履歴系データ拡張に寄せやすい
-    - JSONB / timestamp / UUID などを素直に扱える
+    - PostgreSQL backend では JSONB / timestamp / UUID などを素直に扱える
     - Rust エコシステムが成熟している
 - 拡張の余地
   - 分析用途で DuckDB をサブ DB として利用
-  - ローカル単体運用向けに将来 SQLite backend を復活させる可能性は残す
+  - PostgreSQL backend は self-hosted / server 展開や高度な同期が必要なユーザー向けに維持する
 
 ### 5.3 ID 設計
 

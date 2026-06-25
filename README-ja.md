@@ -36,9 +36,11 @@ Mnema はこの前提に立ち、次のような役割を担うことを目指�
 
 ### ローカルファーストが前提
 
-- データの正本はローカルの「ボルト（Vault）」ディレクトリに置く。
+- データの正本はローカルに置く。
 - 同期はあくまでオプションであり、必須要件ではない（Obsidian の Vault + Sync のイメージに近い）。
-- タスクや構造化データの正本は PostgreSQL に置き、ボルト内にはプロジェクトの説明、ユーザーの趣向、添付、エクスポートなどをファイルとして保存する。
+- 初期状態では SQLite を構造化データの正本にする。Docker や PostgreSQL の導入なしでアプリ単体を触れるようにする。
+- PostgreSQL は self-hosted / サーバー運用向けの任意バックエンドとして残す。
+- ボルト内にはプロジェクトの説明、ユーザーの趣向、添付、エクスポートなどをファイルとして保存する。
 
 ### AI は自律してユーザーをサポートする「秘書」
 
@@ -90,7 +92,8 @@ Mnema は UX として **手間を増やさない** ことを大事にする:
 - **言語**: Rust（コアロジック / バックエンド）
 - **デスクトップシェル**: 検討中（現時点では Tauri を本命候補として評価中）
 - **ストレージ**:
-  - PostgreSQL（`MNEMA_DATABASE_URL` で接続先を指定）
+  - 既定は SQLite
+  - PostgreSQL は `MNEMA_STORAGE_BACKEND=postgres` と `MNEMA_DATABASE_URL` で任意利用
   - ボルト内には添付・エクスポート・アセット・ローカル設定などのファイルを配置
 - **LLM レイヤ**:
   - プロバイダ切替可能（ローカル: Ollama / クラウド: OpenAI 互換 API など）
@@ -106,14 +109,23 @@ Mnema は UX として **手間を増やさない** ことを大事にする:
 
 ## データベース
 
-Mnema は PostgreSQL の接続先を `MNEMA_DATABASE_URL` から読み取る。
-未設定時の開発用デフォルトは以下。
+Mnema は既定で SQLite を使う。ローカルアプリとして触るだけなら Docker や PostgreSQL のインストールは不要。
 
-```text
-postgres://postgres:postgres@localhost/mnema
+SQLite DB は同期フォルダのファイルロックを避けるため、既定では Vault 外に置く。
+
+- Windows: `%LOCALAPPDATA%\Mnema\mnema.sqlite`
+- Linux/macOS 風の環境: `$XDG_DATA_HOME/mnema/mnema.sqlite` または `$HOME/.local/share/mnema/mnema.sqlite`
+
+保存先は `MNEMA_SQLITE_PATH` で上書きできる。
+
+PostgreSQL を使う場合:
+
+```bash
+export MNEMA_STORAGE_BACKEND=postgres
+export MNEMA_DATABASE_URL=postgres://postgres:postgres@localhost/mnema
 ```
 
-DB 統合テストは `MNEMA_TEST_DATABASE_URL` が設定されている場合のみ実DBに接続する。
+PostgreSQL モードで `MNEMA_DATABASE_URL` が未設定の場合、開発用デフォルトとして `postgres://postgres:postgres@localhost/mnema` を試す。
 
 DB なしでスケジューラのデモを確認する場合:
 
@@ -121,7 +133,7 @@ DB なしでスケジューラのデモを確認する場合:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
-PostgreSQL 接続を設定している場合:
+既定の SQLite backend で試す場合:
 
 ```bash
 cargo run -p mnema-desktop -- add "Write first task" --due 2026-06-25 --minutes 45

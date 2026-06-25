@@ -120,26 +120,39 @@ Gantt は Project 分析・長期計画ビューとして後続に回す。
 
 優先順:
 
-1. PostgreSQL 前提の永続化層へ切り替える。
+1. SQLite を既定、PostgreSQL を任意 backend とする永続化層へ切り替える。
 2. `crates/scheduler` を追加し、greedy scheduler を Mnema の domain と接続する。
 3. `ScheduleBlock`, `AvailabilityWindow`, `ExternalEvent`, `RunLog`, `AgentSuggestion` を core / infra に追加する。
 4. `PlanTodayService` と `RepairScheduleService` を作る。
 5. Desktop UI は Gantt より先に Today view と Repair mode を作る。
 6. LLM 秘書は capture, clarify, decomposition, explanation, review を担当する。
 
-## PostgreSQL 化について
+## DB backend 方針について
 
 当初の Mnema 実装は SQLite を Vault 内に置く設計だった。
-今後は PostgreSQL を正本DBとして扱う方針に変更する。
+その後、sync / server / analytics / multi-surface 展開を見据えて PostgreSQL を正本DBに寄せる案を検討した。
 
-理由:
+ただし、初期ユーザーがアプリ単体で触る段階では、PostgreSQL 前提にすると Docker または PostgreSQL インストールが必要になり、導入摩擦が大きい。
+そのため、現時点の折衷案としては以下を採用する。
+
+- 既定 backend は SQLite。
+- SQLite DB は Vault / Dropbox / Google Drive などの同期フォルダ内に置かず、OS の local app data 配下に置く。
+- PostgreSQL は `MNEMA_STORAGE_BACKEND=postgres` と `MNEMA_DATABASE_URL` で任意選択できる backend として残す。
+- Vault は attachment, export, assistant assets, local config などのファイル群の root として残す。
+
+この方針により、ローカルアプリとしてはDBインストールなしで開始でき、self-hosted / server 展開が必要なユーザーは PostgreSQL を選べる。
+
+PostgreSQL を残す理由:
 
 - 後続の sync / server / analytics / multi-surface 展開に寄せやすい。
 - schedule blocks, logs, suggestions などの履歴系テーブルが増えた時に扱いやすい。
 - JSONB や timestamp 型を使いやすい。
 
-ただし、Vault の概念は維持する。
-Vault は attachment, export, assistant assets, local config などのファイル群の root として残し、DB 接続先は `MNEMA_DATABASE_URL` で指定する。
+SQLite を既定にする理由:
+
+- アプリだけで完結しやすく、初回導入に Docker / PostgreSQL が不要。
+- 単一ユーザーのローカル利用では十分に扱いやすい。
+- DB ファイルを同期フォルダ外に置けば、Dropbox Desktop / Google Drive Desktop などによるファイルロック懸念を避けやすい。
 
 ## 当面の非目標
 
