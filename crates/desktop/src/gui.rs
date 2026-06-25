@@ -1,8 +1,13 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use eframe::egui::{self, Align, Color32, Margin, RichText, ScrollArea, Stroke, TextEdit};
+use eframe::egui::{
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, RichText, ScrollArea, Stroke,
+    TextEdit,
+};
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
     ProposedScheduleBlock, SchedulePlanStoreService, TaskCommandService, UpdateTaskRequest,
@@ -43,6 +48,9 @@ enum TaskAction {
     Delete(TaskId),
 }
 
+const INPUT_HEIGHT: f32 = 34.0;
+const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
+
 struct MnemaGuiApp {
     runtime: Runtime,
     vault_path: String,
@@ -67,6 +75,7 @@ struct MnemaGuiApp {
 
 impl MnemaGuiApp {
     fn new(cc: &eframe::CreationContext<'_>, initial_vault_path: PathBuf) -> Self {
+        configure_fonts(&cc.egui_ctx);
         let dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
         configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 });
 
@@ -529,7 +538,10 @@ impl MnemaGuiApp {
         section_header(ui, "Today", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
-            ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut self.target_date));
+            ui.add_sized(
+                [128.0, INPUT_HEIGHT],
+                text_field(&mut self.target_date, "YYYY-MM-DD"),
+            );
             if ui.button("Plan").clicked() {
                 self.plan_today(false);
             }
@@ -566,16 +578,18 @@ impl MnemaGuiApp {
         section_header(ui, "Inbox", palette);
         ui.horizontal(|ui| {
             ui.add_sized(
-                [340.0, 30.0],
-                TextEdit::singleline(&mut self.task_title).hint_text("Task title"),
+                [340.0, INPUT_HEIGHT],
+                text_field(&mut self.task_title, "Task title"),
             );
+            ui.label("Due");
             ui.add_sized(
-                [124.0, 30.0],
-                TextEdit::singleline(&mut self.due_date).hint_text("YYYY-MM-DD"),
+                [128.0, INPUT_HEIGHT],
+                text_field(&mut self.due_date, "YYYY-MM-DD"),
             );
+            ui.label("Estimate");
             ui.add_sized(
-                [64.0, 30.0],
-                TextEdit::singleline(&mut self.minutes).hint_text("min"),
+                [84.0, INPUT_HEIGHT],
+                text_field(&mut self.minutes, "minutes"),
             );
             if ui.button("Add").clicked() {
                 self.add_task();
@@ -592,7 +606,10 @@ impl MnemaGuiApp {
         section_header(ui, "Schedule", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
-            ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut self.target_date));
+            ui.add_sized(
+                [128.0, INPUT_HEIGHT],
+                text_field(&mut self.target_date, "YYYY-MM-DD"),
+            );
             if ui.button("Load").clicked() {
                 self.refresh_schedule();
             }
@@ -631,7 +648,10 @@ impl MnemaGuiApp {
         section_header(ui, "Settings", palette);
         ui.horizontal(|ui| {
             ui.label("Vault");
-            ui.add_sized([520.0, 30.0], TextEdit::singleline(&mut self.vault_path));
+            ui.add_sized(
+                [520.0, INPUT_HEIGHT],
+                text_field(&mut self.vault_path, "Vault path"),
+            );
             if ui.button("Open").clicked() {
                 self.connect_and_refresh();
             }
@@ -668,16 +688,18 @@ impl MnemaGuiApp {
         let mut cancel = false;
         ui.horizontal(|ui| {
             ui.add_sized(
-                [340.0, 30.0],
-                TextEdit::singleline(&mut self.edit_title).hint_text("Task title"),
+                [340.0, INPUT_HEIGHT],
+                text_field(&mut self.edit_title, "Task title"),
             );
+            ui.label("Due");
             ui.add_sized(
-                [124.0, 30.0],
-                TextEdit::singleline(&mut self.edit_due_date).hint_text("YYYY-MM-DD"),
+                [128.0, INPUT_HEIGHT],
+                text_field(&mut self.edit_due_date, "YYYY-MM-DD"),
             );
+            ui.label("Estimate");
             ui.add_sized(
-                [64.0, 30.0],
-                TextEdit::singleline(&mut self.edit_minutes).hint_text("min"),
+                [84.0, INPUT_HEIGHT],
+                text_field(&mut self.edit_minutes, "minutes"),
             );
             if ui.button("Save").clicked() {
                 save = true;
@@ -839,6 +861,40 @@ impl Palette {
     }
 }
 
+fn configure_fonts(ctx: &egui::Context) {
+    let Some(font_bytes) = load_noto_sans_jp() else {
+        return;
+    };
+
+    let mut fonts = FontDefinitions::default();
+    let font_name = "noto_sans_jp".to_owned();
+    fonts.font_data.insert(
+        font_name.clone(),
+        Arc::new(FontData::from_owned(font_bytes)),
+    );
+
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+        family.insert(0, font_name.clone());
+    }
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+        family.push(font_name);
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+fn load_noto_sans_jp() -> Option<Vec<u8>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    [
+        manifest_dir.join("assets/fonts/NotoSansJP-VF.ttf"),
+        manifest_dir.join("assets/fonts/NotoSansJP-Regular.ttf"),
+        PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-VF.ttf"),
+        PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-Regular.ttf"),
+    ]
+    .into_iter()
+    .find_map(|path| fs::read(path).ok())
+}
+
 fn configure_style(ctx: &egui::Context, dark_factor: f32) {
     let palette = Palette::at(dark_factor);
     let mut style = egui::Theme::from_dark_mode(dark_factor >= 0.5).default_style();
@@ -859,25 +915,31 @@ fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, label: &str) {
 }
 
 fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
-    egui::Frame::new()
-        .fill(palette.switch_bg)
-        .stroke(Stroke::new(1.0, palette.border))
-        .corner_radius(18.0)
-        .inner_margin(Margin::symmetric(3, 3))
-        .show(ui, |ui| {
-            ui.set_min_size(egui::vec2(70.0, 30.0));
-            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
-                    *dark_mode = false;
-                    ui.ctx().set_theme(egui::Theme::Light);
-                }
-                if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
-                    *dark_mode = true;
-                    ui.ctx().set_theme(egui::Theme::Dark);
-                }
-            });
-        });
+    ui.allocate_ui_with_layout(
+        THEME_SWITCH_SIZE,
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            let rect = ui.max_rect();
+            ui.painter().rect(
+                rect,
+                18.0,
+                palette.switch_bg,
+                Stroke::new(1.0, palette.border),
+                egui::StrokeKind::Inside,
+            );
+            ui.spacing_mut().button_padding = egui::vec2(5.0, 4.0);
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.add_space(3.0);
+            if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
+                *dark_mode = false;
+                ui.ctx().set_theme(egui::Theme::Light);
+            }
+            if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
+                *dark_mode = true;
+                ui.ctx().set_theme(egui::Theme::Dark);
+            }
+        },
+    );
 }
 
 fn theme_icon_button(
@@ -896,7 +958,13 @@ fn theme_icon_button(
     if selected {
         button = button.fill(palette.selected_fill);
     }
-    ui.add_sized([32.0, 28.0], button).on_hover_text(hover_text)
+    ui.add_sized([31.0, 28.0], button).on_hover_text(hover_text)
+}
+
+fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a> {
+    TextEdit::singleline(value)
+        .hint_text(hint_text)
+        .vertical_align(Align::Center)
 }
 
 fn themed_visuals(palette: Palette, dark_factor: f32) -> egui::Visuals {
