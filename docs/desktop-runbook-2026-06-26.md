@@ -11,8 +11,8 @@
 - Inbox: quick capture とタスク追加。
 - Today: 今日の候補タスク、計画生成、ScheduleBlock 保存。
 - Today repair: scheduled / done / active / locked block を固定し、proposed block を再提案。
-- Projects: Project / List / Milestone の追加と選択。
-- Schedule: 日別タイムライン、ScheduleBlock の状態・時刻編集。
+- Projects: Project / List / Milestone の追加と選択、Project Gantt 表示。
+- Schedule: 日別タイムライン、月間 Calendar 表示、ScheduleBlock の状態・時刻編集。
 - Assistant: LLM provider 設定時の簡易相談、またはタスク作成。
 - Activity: AutomationLog の確認。
 - Settings: Vault、SQLite、PostgreSQL、LLM、テーマ設定。
@@ -64,8 +64,8 @@ PostgreSQL は self-hosted / server 運用向けの任意 backend として残�
 
 ## まだ残る作業
 
-- Calendar / Gantt の本格ビュー。
 - Assistant からの計画修正と承認 UI。
+- Calendar / Gantt の編集操作、フィルタ、依存関係表示。
 - AutomationLog からの undo / review UI。
 - Windows インストーラー、署名、auto-update。
 - モバイル / Web クライアントの再評価。

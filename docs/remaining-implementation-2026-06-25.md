@@ -15,6 +15,8 @@
 - Today plan を生成し、ScheduleBlock として保存できる。
 - Today repair で scheduled / done / active / locked block を固定し、proposed block を再提案できる。
 - Schedule は日別タイムラインとして表示できる。
+- Schedule は月間 Calendar 表示へ切り替えられる。
+- Projects は Project Gantt 表示へ切り替えられる。
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
 - Today plan 保存時、既存 proposed blocks を置き換える前に確認できる。
 - due date / estimate / schedule 時刻は専用 UI で編集できる。
@@ -51,7 +53,7 @@
 ## P2: 統合案の後続拡張
 
 - Project / Milestone / List の基本 UI。完了。
-- Gantt または Calendar 表示
+- Calendar / Gantt の基本表示。完了。
 - 週次レビュー生成
 - 外部カレンダー連携
 - モバイル・Web クライアント再評価
@@ -66,7 +68,7 @@ PostgreSQL は self-hosted / server 運用向けの任意 backend として残�
 ## 次に着手する推奨順
 
 1. Assistant からの計画修正提案と承認 UI。
-2. Calendar または Gantt の本格ビュー。
+2. Calendar / Gantt の編集操作、フィルタ、依存関係表示。
 3. AutomationLog の review / undo UI。
 4. 週次レビュー生成。
 5. Windows インストーラー、署名、auto-update。
