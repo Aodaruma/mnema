@@ -17,6 +17,8 @@
 - Activity: AutomationLog の確認。
 - Settings: Vault、SQLite、PostgreSQL、LLM、テーマ設定。
 
+各画面の役割は `docs/desktop-ui-guide-2026-06-26.md` に整理している。
+
 ## 開発起動
 
 PowerShell から以下を実行する。
