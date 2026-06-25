@@ -193,10 +193,12 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 * [ ] `core` に「ジョブ種別」を表現する enum を定義
 
   * `AutomationJobKind::InboxClassify`, `WeeklyReview`, `DueDateSuggestion`, など
+* [x] `scheduler` crate に、DB / UI / LLM に依存しない greedy scheduler の最小実装を追加
 * [ ] `infra` にジョブキュー実装（シンプルなローカルキュー）
 * [ ] 各ジョブを処理する `AutomationService` を core に実装
 
   * LlmClient と Repository を受け取って動く構造にする
+  * ScheduleGeneration は `scheduler` crate の出力をレビュー可能な提案として扱う
 
 ### 6.3 AI に投げるときのサンプルプロンプト
 

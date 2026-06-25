@@ -150,6 +150,7 @@ mnema/
     specification-v0.1.md
   crates/
     core/         # domain models, services
+    scheduler/    # deterministic planning and schedule proposal logic
     infra/        # DB, LLM clients, sync
     desktop/      # desktop app (Tauri / other)
 ```

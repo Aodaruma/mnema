@@ -131,6 +131,7 @@ mnema/
     specification-v0.1.md
   crates/
     core/         # ドメインモデル・サービス
+    scheduler/    # 決定的な計画生成・スケジュール提案ロジック
     infra/        # DB, LLM クライアント, 同期周り
     desktop/      # デスクトップアプリ（Tauri など）
 ```

@@ -331,6 +331,9 @@ Vault は添付・エクスポート・秘書アセット・ローカル設定�
   - Task / Project / List / Milestone / Assistant などのビジネスロジック
 - infrastructure 層
   - DB（PostgreSQL）、ファイルストレージ、同期クライアント、LLM クライアント
+- scheduler 層
+  - タスク・空き時間・busy block から決定的にスケジュール案を生成
+  - LLM には依存せず、同じ入力から同じ出力を返す
 - application / service 層
   - ユースケース単位のサービス
     - Inbox への追加
