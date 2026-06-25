@@ -144,3 +144,42 @@ async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn schedule_block_replace_and_list_for_day() -> anyhow::Result<()> {
+    let Some(vault) = test_vault().await? else {
+        return Ok(());
+    };
+    let repo = vault.schedule_block_repo();
+    let target_date = today();
+    let start_at = target_date.with_hms(9, 0, 0)?.assume_utc();
+    let end_at = target_date.with_hms(9, 45, 0)?.assume_utc();
+    let now = utc_now();
+    let block = ScheduleBlock {
+        id: ScheduleBlockId::new(),
+        task_id: None,
+        title_snapshot: Some("Proposed block".into()),
+        start_at,
+        end_at,
+        block_type: ScheduleBlockType::Task,
+        state: ScheduleBlockState::Proposed,
+        locked: false,
+        source: ScheduleBlockSource::Scheduler,
+        required_minutes: Some(45),
+        created_at: now,
+        updated_at: now,
+    };
+
+    repo.replace_proposed_for_day(target_date, vec![block.clone()])
+        .await?;
+    let blocks = repo.list_for_day(target_date).await?;
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].title_snapshot, block.title_snapshot);
+
+    repo.replace_proposed_for_day(target_date, Vec::new())
+        .await?;
+    let blocks = repo.list_for_day(target_date).await?;
+    assert!(blocks.is_empty());
+
+    Ok(())
+}

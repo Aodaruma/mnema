@@ -9,6 +9,7 @@ pub mod llm_memory;
 pub mod milestone;
 pub mod project;
 pub mod repository;
+pub mod schedule_block;
 pub mod status;
 pub mod task;
 pub mod user_settings;
@@ -23,6 +24,7 @@ pub mod prelude {
     pub use crate::milestone::*;
     pub use crate::project::*;
     pub use crate::repository::*;
+    pub use crate::schedule_block::*;
     pub use crate::status::*;
     pub use crate::task::*;
     pub use crate::user_settings::*;

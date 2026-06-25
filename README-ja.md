@@ -126,7 +126,8 @@ PostgreSQL 接続を設定している場合:
 ```bash
 cargo run -p mnema-desktop -- add "Write first task" --due 2026-06-25 --minutes 45
 cargo run -p mnema-desktop -- list
-cargo run -p mnema-desktop -- plan
+cargo run -p mnema-desktop -- plan --save
+cargo run -p mnema-desktop -- schedule
 ```
 
 ---

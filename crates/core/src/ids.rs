@@ -32,6 +32,7 @@ id_type!(ListId);
 id_type!(StatusId);
 id_type!(StatusGroupId);
 id_type!(MilestoneId);
+id_type!(ScheduleBlockId);
 id_type!(UserId);
 id_type!(AssistantId);
 id_type!(AutomationLogId);

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use mnema_core::prelude::*;
 use sqlx::{PgPool, Row};
+use time::{Date, Duration, OffsetDateTime};
 
 fn status_group_kind_to_str(kind: &StatusGroupKind) -> &'static str {
     match kind {
@@ -90,8 +91,69 @@ fn llm_provider_from_string(provider: &str) -> LlmProvider {
     }
 }
 
+fn schedule_block_type_to_str(block_type: &ScheduleBlockType) -> &'static str {
+    match block_type {
+        ScheduleBlockType::Task => "TASK",
+        ScheduleBlockType::Habit => "HABIT",
+        ScheduleBlockType::ExternalEvent => "EXTERNAL_EVENT",
+        ScheduleBlockType::Buffer => "BUFFER",
+    }
+}
+
+fn schedule_block_type_from_str(value: &str) -> ScheduleBlockType {
+    match value {
+        "HABIT" => ScheduleBlockType::Habit,
+        "EXTERNAL_EVENT" => ScheduleBlockType::ExternalEvent,
+        "BUFFER" => ScheduleBlockType::Buffer,
+        _ => ScheduleBlockType::Task,
+    }
+}
+
+fn schedule_block_state_to_str(state: &ScheduleBlockState) -> &'static str {
+    match state {
+        ScheduleBlockState::Proposed => "PROPOSED",
+        ScheduleBlockState::Scheduled => "SCHEDULED",
+        ScheduleBlockState::Active => "ACTIVE",
+        ScheduleBlockState::Done => "DONE",
+        ScheduleBlockState::Missed => "MISSED",
+        ScheduleBlockState::Cancelled => "CANCELLED",
+    }
+}
+
+fn schedule_block_state_from_str(value: &str) -> ScheduleBlockState {
+    match value {
+        "SCHEDULED" => ScheduleBlockState::Scheduled,
+        "ACTIVE" => ScheduleBlockState::Active,
+        "DONE" => ScheduleBlockState::Done,
+        "MISSED" => ScheduleBlockState::Missed,
+        "CANCELLED" => ScheduleBlockState::Cancelled,
+        _ => ScheduleBlockState::Proposed,
+    }
+}
+
+fn schedule_block_source_to_str(source: &ScheduleBlockSource) -> &'static str {
+    match source {
+        ScheduleBlockSource::Scheduler => "SCHEDULER",
+        ScheduleBlockSource::Manual => "MANUAL",
+        ScheduleBlockSource::ExternalCalendar => "EXTERNAL_CALENDAR",
+    }
+}
+
+fn schedule_block_source_from_str(value: &str) -> ScheduleBlockSource {
+    match value {
+        "MANUAL" => ScheduleBlockSource::Manual,
+        "EXTERNAL_CALENDAR" => ScheduleBlockSource::ExternalCalendar,
+        _ => ScheduleBlockSource::Scheduler,
+    }
+}
+
 fn map_storage_err(e: impl ToString) -> CoreError {
     CoreError::Storage(e.to_string())
+}
+
+fn day_bounds(day: Date) -> Result<(OffsetDateTime, OffsetDateTime)> {
+    let start = day.with_hms(0, 0, 0)?.assume_utc();
+    Ok((start, start + Duration::days(1)))
 }
 
 #[derive(Clone)]
@@ -742,6 +804,171 @@ impl StatusRepository for PostgresStatusRepository {
         }
         Ok(statuses)
     }
+}
+
+#[derive(Clone)]
+pub struct PostgresScheduleBlockRepository {
+    pool: PgPool,
+}
+
+impl PostgresScheduleBlockRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
+    async fn insert(&self, block: ScheduleBlock) -> CoreResult<()> {
+        insert_schedule_block(&self.pool, block).await
+    }
+
+    async fn find(&self, id: ScheduleBlockId) -> CoreResult<Option<ScheduleBlock>> {
+        let row = sqlx::query("SELECT * FROM schedule_blocks WHERE id = $1")
+            .bind(id.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_storage_err)?;
+
+        row.map(row_to_schedule_block)
+            .transpose()
+            .map_err(map_storage_err)
+    }
+
+    async fn list_for_day(&self, day: Date) -> CoreResult<Vec<ScheduleBlock>> {
+        let (start, end) = day_bounds(day).map_err(map_storage_err)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM schedule_blocks
+            WHERE start_at >= $1 AND start_at < $2
+            ORDER BY start_at, title_snapshot
+        "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_schedule_block)
+            .map(|r| r.map_err(map_storage_err))
+            .collect()
+    }
+
+    async fn replace_proposed_for_day(
+        &self,
+        day: Date,
+        blocks: Vec<ScheduleBlock>,
+    ) -> CoreResult<()> {
+        let (start, end) = day_bounds(day).map_err(map_storage_err)?;
+        let mut tx = self.pool.begin().await.map_err(map_storage_err)?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM schedule_blocks
+            WHERE source = 'SCHEDULER'
+              AND state = 'PROPOSED'
+              AND start_at >= $1
+              AND start_at < $2
+        "#,
+        )
+        .bind(start)
+        .bind(end)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_storage_err)?;
+
+        for block in blocks {
+            insert_schedule_block_in_tx(&mut tx, block).await?;
+        }
+
+        tx.commit().await.map_err(map_storage_err)?;
+        Ok(())
+    }
+}
+
+async fn insert_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO schedule_blocks (
+            id, task_id, title_snapshot, start_at, end_at, block_type,
+            state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    "#,
+    )
+    .bind(block.id.0)
+    .bind(block.task_id.map(|id| id.0))
+    .bind(block.title_snapshot)
+    .bind(block.start_at)
+    .bind(block.end_at)
+    .bind(schedule_block_type_to_str(&block.block_type))
+    .bind(schedule_block_state_to_str(&block.state))
+    .bind(block.locked)
+    .bind(schedule_block_source_to_str(&block.source))
+    .bind(block.required_minutes.map(i64::from))
+    .bind(block.created_at)
+    .bind(block.updated_at)
+    .execute(pool)
+    .await
+    .map_err(map_storage_err)?;
+    Ok(())
+}
+
+async fn insert_schedule_block_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    block: ScheduleBlock,
+) -> CoreResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO schedule_blocks (
+            id, task_id, title_snapshot, start_at, end_at, block_type,
+            state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    "#,
+    )
+    .bind(block.id.0)
+    .bind(block.task_id.map(|id| id.0))
+    .bind(block.title_snapshot)
+    .bind(block.start_at)
+    .bind(block.end_at)
+    .bind(schedule_block_type_to_str(&block.block_type))
+    .bind(schedule_block_state_to_str(&block.state))
+    .bind(block.locked)
+    .bind(schedule_block_source_to_str(&block.source))
+    .bind(block.required_minutes.map(i64::from))
+    .bind(block.created_at)
+    .bind(block.updated_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_storage_err)?;
+    Ok(())
+}
+
+fn row_to_schedule_block(row: sqlx::postgres::PgRow) -> Result<ScheduleBlock> {
+    let block_type: String = row.try_get("block_type")?;
+    let state: String = row.try_get("state")?;
+    let source: String = row.try_get("source")?;
+
+    Ok(ScheduleBlock {
+        id: ScheduleBlockId::from(row.try_get::<uuid::Uuid, _>("id")?),
+        task_id: row
+            .try_get::<Option<uuid::Uuid>, _>("task_id")?
+            .map(TaskId::from),
+        title_snapshot: row.try_get("title_snapshot")?,
+        start_at: row.try_get("start_at")?,
+        end_at: row.try_get("end_at")?,
+        block_type: schedule_block_type_from_str(&block_type),
+        state: schedule_block_state_from_str(&state),
+        locked: row.try_get("locked")?,
+        source: schedule_block_source_from_str(&source),
+        required_minutes: row
+            .try_get::<Option<i64>, _>("required_minutes")?
+            .map(|value| value as u32),
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
 }
 
 #[derive(Clone)]

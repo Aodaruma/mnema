@@ -9,7 +9,8 @@ mod repositories;
 
 pub use repositories::{
     PostgresListRepository, PostgresMilestoneRepository, PostgresProjectRepository,
-    PostgresStatusRepository, PostgresTaskRepository, PostgresUserSettingsRepository,
+    PostgresScheduleBlockRepository, PostgresStatusRepository, PostgresTaskRepository,
+    PostgresUserSettingsRepository,
 };
 
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost/mnema";
@@ -75,6 +76,10 @@ impl Vault {
 
     pub fn status_repo(&self) -> PostgresStatusRepository {
         PostgresStatusRepository::new(self.pool.clone())
+    }
+
+    pub fn schedule_block_repo(&self) -> PostgresScheduleBlockRepository {
+        PostgresScheduleBlockRepository::new(self.pool.clone())
     }
 
     pub fn user_settings_repo(&self) -> PostgresUserSettingsRepository {

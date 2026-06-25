@@ -1,14 +1,15 @@
 use crate::list::List;
 use crate::milestone::Milestone;
 use crate::project::Project;
+use crate::schedule_block::ScheduleBlock;
 use crate::status::{Status, StatusGroup};
 use crate::task::Task;
 use crate::{
-    ids::{ListId, MilestoneId, ProjectId, TaskId},
+    ids::{ListId, MilestoneId, ProjectId, ScheduleBlockId, TaskId},
     user_settings::UserSettings,
 };
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
@@ -65,6 +66,18 @@ pub trait StatusRepository: Send + Sync {
         &self,
         project_id: Option<ProjectId>,
     ) -> CoreResult<Vec<Status>>;
+}
+
+#[async_trait::async_trait]
+pub trait ScheduleBlockRepository: Send + Sync {
+    async fn insert(&self, block: ScheduleBlock) -> CoreResult<()>;
+    async fn find(&self, id: ScheduleBlockId) -> CoreResult<Option<ScheduleBlock>>;
+    async fn list_for_day(&self, day: Date) -> CoreResult<Vec<ScheduleBlock>>;
+    async fn replace_proposed_for_day(
+        &self,
+        day: Date,
+        blocks: Vec<ScheduleBlock>,
+    ) -> CoreResult<()>;
 }
 
 #[async_trait::async_trait]

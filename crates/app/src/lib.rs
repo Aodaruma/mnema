@@ -199,6 +199,56 @@ impl<'a> PlanTodayService<'a> {
     }
 }
 
+pub struct SchedulePlanStoreService<'a> {
+    schedule_blocks: &'a dyn ScheduleBlockRepository,
+}
+
+impl<'a> SchedulePlanStoreService<'a> {
+    #[must_use]
+    pub fn new(schedule_blocks: &'a dyn ScheduleBlockRepository) -> Self {
+        Self { schedule_blocks }
+    }
+
+    pub async fn save_proposed_plan(
+        &self,
+        plan: &PlanTodayResult,
+    ) -> AppResult<Vec<ScheduleBlock>> {
+        let now = OffsetDateTime::now_utc();
+        let blocks = plan
+            .output
+            .blocks
+            .iter()
+            .map(|block| ScheduleBlock {
+                id: ScheduleBlockId::new(),
+                task_id: Some(block.task_id.clone()),
+                title_snapshot: Some(block.title.clone()),
+                start_at: block.window.start,
+                end_at: block.window.end,
+                block_type: ScheduleBlockType::Task,
+                state: ScheduleBlockState::Proposed,
+                locked: false,
+                source: ScheduleBlockSource::Scheduler,
+                required_minutes: Some(block.required_minutes),
+                created_at: now,
+                updated_at: now,
+            })
+            .collect::<Vec<_>>();
+
+        self.schedule_blocks
+            .replace_proposed_for_day(plan.target_date, blocks.clone())
+            .await?;
+
+        Ok(blocks)
+    }
+
+    pub async fn list_for_day(&self, day: Date) -> AppResult<Vec<ScheduleBlock>> {
+        self.schedule_blocks
+            .list_for_day(day)
+            .await
+            .map_err(Into::into)
+    }
+}
+
 async fn default_task_status_id(statuses: &dyn StatusRepository) -> AppResult<StatusId> {
     let groups = statuses.list_groups().await?;
     let group_kinds = groups
@@ -390,6 +440,46 @@ mod tests {
 
         async fn update(&self, _list: List) -> CoreResult<()> {
             unimplemented!("not needed")
+        }
+    }
+
+    struct MemoryScheduleBlockRepository {
+        blocks: Mutex<Vec<ScheduleBlock>>,
+    }
+
+    #[async_trait]
+    impl ScheduleBlockRepository for MemoryScheduleBlockRepository {
+        async fn insert(&self, block: ScheduleBlock) -> CoreResult<()> {
+            self.blocks.lock().unwrap().push(block);
+            Ok(())
+        }
+
+        async fn find(&self, id: ScheduleBlockId) -> CoreResult<Option<ScheduleBlock>> {
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|block| block.id == id)
+                .cloned())
+        }
+
+        async fn list_for_day(&self, _day: Date) -> CoreResult<Vec<ScheduleBlock>> {
+            Ok(self.blocks.lock().unwrap().clone())
+        }
+
+        async fn replace_proposed_for_day(
+            &self,
+            _day: Date,
+            blocks: Vec<ScheduleBlock>,
+        ) -> CoreResult<()> {
+            let mut stored = self.blocks.lock().unwrap();
+            stored.retain(|block| {
+                !(block.source == ScheduleBlockSource::Scheduler
+                    && block.state == ScheduleBlockState::Proposed)
+            });
+            stored.extend(blocks);
+            Ok(())
         }
     }
 
@@ -585,5 +675,40 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, AppError::EmptyTaskTitle));
+    }
+
+    #[tokio::test]
+    async fn saves_proposed_plan_as_schedule_blocks() {
+        let schedule_blocks = MemoryScheduleBlockRepository {
+            blocks: Mutex::new(Vec::new()),
+        };
+        let task_id = TaskId::new();
+        let plan = PlanTodayResult {
+            target_date: date!(2026 - 06 - 25),
+            output: SchedulingOutput {
+                blocks: vec![ProposedScheduleBlock {
+                    task_id: task_id.clone(),
+                    title: "Write code".into(),
+                    window: TimeWindow::new(
+                        datetime!(2026-06-25 09:00 UTC),
+                        datetime!(2026-06-25 09:30 UTC),
+                    ),
+                    required_minutes: 30,
+                }],
+                unscheduled: Vec::new(),
+                issues: Vec::new(),
+            },
+        };
+        let service = SchedulePlanStoreService::new(&schedule_blocks);
+
+        let saved = service.save_proposed_plan(&plan).await.unwrap();
+
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].task_id, Some(task_id));
+        assert_eq!(saved[0].state, ScheduleBlockState::Proposed);
+        assert_eq!(
+            service.list_for_day(plan.target_date).await.unwrap().len(),
+            1
+        );
     }
 }

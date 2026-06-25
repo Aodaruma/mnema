@@ -1,6 +1,6 @@
 use mnema_app::{
     AvailabilityWindow, BusyBlock, CaptureTaskRequest, CaptureTaskService, GreedyScheduler,
-    PlanTodayRequest, PlanTodayService, SchedulingInput, TimeWindow,
+    PlanTodayRequest, PlanTodayService, SchedulePlanStoreService, SchedulingInput, TimeWindow,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::Vault;
@@ -29,6 +29,7 @@ async fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("add") => run_add(&args[1..]).await,
         Some("list") => run_list(&args[1..]).await,
+        Some("schedule") => run_schedule(&args[1..]).await,
         Some("plan") | None => run_plan(args.get(1..).unwrap_or_default()).await,
         Some(path) => {
             let path_args = vec![path.to_string()];
@@ -39,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_plan(args: &[String]) -> anyhow::Result<()> {
     let vault_path = vault_path_from_args(args, true);
+    let save = args.iter().any(|arg| arg == "--save");
 
     println!("Vault: {}", vault_path.display());
     let vault = Vault::connect_or_init(&vault_path).await?;
@@ -57,6 +59,12 @@ async fn run_plan(args: &[String]) -> anyhow::Result<()> {
         .await?;
 
     print_plan("Today plan", result.target_date, &result.output.blocks);
+    if save {
+        let schedule_block_repo = vault.schedule_block_repo();
+        let store = SchedulePlanStoreService::new(&schedule_block_repo);
+        let saved = store.save_proposed_plan(&result).await?;
+        println!("Saved proposed schedule blocks: {}", saved.len());
+    }
     if !result.output.unscheduled.is_empty() {
         println!("Unscheduled tasks: {}", result.output.unscheduled.len());
     }
@@ -64,6 +72,19 @@ async fn run_plan(args: &[String]) -> anyhow::Result<()> {
         println!("No candidate tasks for today.");
     }
 
+    Ok(())
+}
+
+async fn run_schedule(args: &[String]) -> anyhow::Result<()> {
+    let vault_path = vault_path_from_args(args, false);
+    let vault = Vault::connect_or_init(&vault_path).await?;
+    let target_date =
+        optional_date_arg(args, "--date")?.unwrap_or_else(|| OffsetDateTime::now_utc().date());
+    let schedule_block_repo = vault.schedule_block_repo();
+    let store = SchedulePlanStoreService::new(&schedule_block_repo);
+    let blocks = store.list_for_day(target_date).await?;
+
+    print_saved_schedule("Saved schedule", target_date, &blocks);
     Ok(())
 }
 
@@ -139,9 +160,10 @@ fn print_help() {
     println!("Mnema desktop stub");
     println!();
     println!("Usage:");
-    println!("  mnema-desktop plan [--vault PATH]");
+    println!("  mnema-desktop plan [--save] [--vault PATH]");
     println!("  mnema-desktop add \"Task title\" [--due YYYY-MM-DD] [--minutes N] [--vault PATH]");
     println!("  mnema-desktop list [--vault PATH]");
+    println!("  mnema-desktop schedule [--date YYYY-MM-DD] [--vault PATH]");
     println!("  mnema-desktop --demo-plan");
     println!();
     println!("Environment:");
@@ -189,6 +211,39 @@ fn run_demo_plan() {
         time::macros::date!(2026 - 06 - 25),
         &output.blocks,
     );
+}
+
+fn print_saved_schedule(label: &str, date: Date, blocks: &[ScheduleBlock]) {
+    println!("{label}: {date}");
+    if blocks.is_empty() {
+        println!("  No saved schedule blocks.");
+        return;
+    }
+
+    for block in blocks {
+        let title = block
+            .title_snapshot
+            .as_deref()
+            .unwrap_or("(untitled block)");
+        println!(
+            "  {}-{}  {} [{}]",
+            format_hm(block.start_at),
+            format_hm(block.end_at),
+            title,
+            schedule_block_state_label(&block.state)
+        );
+    }
+}
+
+fn schedule_block_state_label(state: &ScheduleBlockState) -> &'static str {
+    match state {
+        ScheduleBlockState::Proposed => "proposed",
+        ScheduleBlockState::Scheduled => "scheduled",
+        ScheduleBlockState::Active => "active",
+        ScheduleBlockState::Done => "done",
+        ScheduleBlockState::Missed => "missed",
+        ScheduleBlockState::Cancelled => "cancelled",
+    }
 }
 
 fn print_plan(label: &str, date: Date, blocks: &[mnema_app::ProposedScheduleBlock]) {
@@ -272,7 +327,7 @@ fn optional_u32_arg(args: &[String], name: &str) -> anyhow::Result<Option<u32>> 
 }
 
 fn known_option_value(args: &[String], value: &str) -> bool {
-    ["--due", "--minutes", "--vault"]
+    ["--due", "--minutes", "--vault", "--date"]
         .iter()
         .filter_map(|name| option_arg(args, name))
         .any(|option_value| option_value == value)
