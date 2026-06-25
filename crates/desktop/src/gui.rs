@@ -44,6 +44,7 @@ enum View {
     Inbox,
     Schedule,
     Assistant,
+    Activity,
     Settings,
 }
 
@@ -157,6 +158,7 @@ struct NativeMenu {
     inbox: MenuItem,
     schedule: MenuItem,
     assistant: MenuItem,
+    activity: MenuItem,
     settings: MenuItem,
     light_mode: CheckMenuItem,
     dark_mode: CheckMenuItem,
@@ -206,6 +208,7 @@ impl NativeMenu {
         let inbox = MenuItem::with_id("mnema.view.inbox", "&Inbox", true, None);
         let schedule = MenuItem::with_id("mnema.view.schedule", "&Schedule", true, None);
         let assistant = MenuItem::with_id("mnema.view.assistant", "&Assistant", true, None);
+        let activity = MenuItem::with_id("mnema.view.activity", "Acti&vity", true, None);
         let settings = MenuItem::with_id("mnema.view.settings", "Se&ttings", true, None);
         let light_mode =
             CheckMenuItem::with_id("mnema.theme.light", "&Light mode", true, !dark_mode, None);
@@ -220,6 +223,7 @@ impl NativeMenu {
                 &inbox,
                 &schedule,
                 &assistant,
+                &activity,
                 &settings,
                 &view_separator,
                 &light_mode,
@@ -239,6 +243,7 @@ impl NativeMenu {
             inbox,
             schedule,
             assistant,
+            activity,
             settings,
             light_mode,
             dark_mode: dark_mode_item,
@@ -298,6 +303,8 @@ impl NativeMenu {
             Some(MenuAction::SetView(View::Schedule))
         } else if id == self.assistant.id().as_ref() {
             Some(MenuAction::SetView(View::Assistant))
+        } else if id == self.activity.id().as_ref() {
+            Some(MenuAction::SetView(View::Activity))
         } else if id == self.settings.id().as_ref() {
             Some(MenuAction::SetView(View::Settings))
         } else if id == self.light_mode.id().as_ref() {
@@ -386,6 +393,7 @@ struct MnemaGuiApp {
     tasks: Vec<Task>,
     plan: Option<PlanTodayResult>,
     schedule: Vec<ScheduleBlock>,
+    automation_logs: Vec<AutomationLog>,
     message: String,
     error: Option<String>,
     dark_mode: bool,
@@ -449,6 +457,7 @@ impl MnemaGuiApp {
             tasks: Vec::new(),
             plan: None,
             schedule: Vec::new(),
+            automation_logs: Vec::new(),
             message: String::new(),
             error: None,
             dark_mode,
@@ -488,6 +497,7 @@ impl MnemaGuiApp {
                 self.error = None;
                 self.refresh_tasks();
                 self.refresh_schedule();
+                self.refresh_automation_logs();
             }
             Err(error) => self.set_error(error),
         }
@@ -748,6 +758,24 @@ impl MnemaGuiApp {
         }
     }
 
+    fn refresh_automation_logs(&mut self) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let repo = vault.automation_log_repo();
+            Result::<Vec<AutomationLog>>::Ok(repo.list_recent(100).await?)
+        });
+
+        match result {
+            Ok(logs) => {
+                self.automation_logs = logs;
+                self.error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn update_schedule_block_state(
         &mut self,
         block_id: ScheduleBlockId,
@@ -949,6 +977,7 @@ impl MnemaGuiApp {
                 self.message = format!("Added: {}", task.title);
                 self.error = None;
                 self.refresh_tasks();
+                self.refresh_automation_logs();
             }
             Err(error) => self.set_error(error),
         }
@@ -1169,6 +1198,7 @@ impl eframe::App for MnemaGuiApp {
                     if ui.button("Refresh").clicked() {
                         self.refresh_tasks();
                         self.refresh_schedule();
+                        self.refresh_automation_logs();
                     }
                     let backend = self
                         .backend
@@ -1193,6 +1223,7 @@ impl eframe::App for MnemaGuiApp {
                 nav_button(ui, &mut self.view, View::Inbox, "Inbox");
                 nav_button(ui, &mut self.view, View::Schedule, "Schedule");
                 nav_button(ui, &mut self.view, View::Assistant, "Assistant");
+                nav_button(ui, &mut self.view, View::Activity, "Activity");
                 ui.separator();
                 nav_button(ui, &mut self.view, View::Settings, "Settings");
             });
@@ -1212,6 +1243,7 @@ impl eframe::App for MnemaGuiApp {
             View::Inbox => self.show_inbox(ui, palette),
             View::Schedule => self.show_schedule(ui, palette),
             View::Assistant => self.show_assistant(ui, palette),
+            View::Activity => self.show_activity(ui, palette),
             View::Settings => self.show_settings(ui, palette),
         });
     }
@@ -1325,6 +1357,40 @@ impl MnemaGuiApp {
             );
             if ui.button("Send").clicked() {
                 self.send_assistant_message();
+            }
+        });
+    }
+
+    fn show_activity(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Activity", palette);
+        ui.horizontal(|ui| {
+            if ui.button("Refresh").clicked() {
+                self.refresh_automation_logs();
+            }
+            ui.label(format!("{} logs", self.automation_logs.len()));
+        });
+        ui.add_space(10.0);
+
+        if self.automation_logs.is_empty() {
+            ui.label("No activity yet.");
+            return;
+        }
+
+        ScrollArea::vertical().show(ui, |ui| {
+            for log in &self.automation_logs {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(bold_text(automation_action_label(&log.action_type)));
+                        ui.label(regular_text(format_hm(log.created_at)).color(palette.muted));
+                    });
+                    if let Some(title) = automation_log_title(log) {
+                        ui.label(title);
+                    }
+                    if let Some(explanation) = &log.explanation {
+                        ui.label(regular_text(explanation.as_str()).color(palette.muted));
+                    }
+                });
+                ui.add_space(8.0);
             }
         });
     }
@@ -2518,6 +2584,25 @@ fn schedule_state_label(state: &ScheduleBlockState) -> &'static str {
         ScheduleBlockState::Missed => "missed",
         ScheduleBlockState::Cancelled => "cancelled",
     }
+}
+
+fn automation_action_label(action_type: &AutomationActionType) -> String {
+    match action_type {
+        AutomationActionType::Move => "Move".to_string(),
+        AutomationActionType::UpdateDue => "Update due".to_string(),
+        AutomationActionType::Classify => "Classify".to_string(),
+        AutomationActionType::CreateTask => "Create task".to_string(),
+        AutomationActionType::UpdateStatus => "Update status".to_string(),
+        AutomationActionType::Other(value) => value.clone(),
+    }
+}
+
+fn automation_log_title(log: &AutomationLog) -> Option<String> {
+    log.after_state
+        .as_ref()
+        .and_then(|value| value.get("title"))
+        .and_then(|value| value.as_str())
+        .map(|title| format!("Task: {title}"))
 }
 
 #[cfg(test)]
