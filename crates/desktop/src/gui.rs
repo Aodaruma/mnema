@@ -930,12 +930,20 @@ impl MnemaGuiApp {
         });
         ui.add_space(12.0);
 
+        let target_date = match parse_required_date(&self.target_date) {
+            Ok(date) => date,
+            Err(error) => {
+                ui.colored_label(palette.error, error.to_string());
+                return;
+            }
+        };
+
         if self.schedule.is_empty() {
             ui.label("No saved schedule blocks.");
             return;
         }
 
-        if let Some(action) = saved_schedule_list(ui, &self.schedule, palette) {
+        if let Some(action) = schedule_calendar_view(ui, target_date, &self.schedule, palette) {
             self.handle_schedule_action(action);
         }
     }
@@ -1420,55 +1428,245 @@ fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
     });
 }
 
-fn saved_schedule_list(
+fn schedule_calendar_view(
+    ui: &mut egui::Ui,
+    target_date: Date,
+    blocks: &[ScheduleBlock],
+    palette: Palette,
+) -> Option<ScheduleAction> {
+    let mut action = None;
+    ui.horizontal_top(|ui| {
+        schedule_timeline(ui, target_date, blocks, palette);
+        ui.add_space(12.0);
+        action = schedule_action_panel(ui, blocks, palette);
+    });
+    action
+}
+
+fn schedule_timeline(
+    ui: &mut egui::Ui,
+    target_date: Date,
+    blocks: &[ScheduleBlock],
+    palette: Palette,
+) {
+    let Ok((day_start, day_end)) = schedule_bounds(target_date, blocks) else {
+        ui.colored_label(palette.error, "Invalid schedule bounds.");
+        return;
+    };
+    let total_minutes = (day_end - day_start).whole_minutes().max(60) as f32;
+    let height = (total_minutes * 1.15).clamp(420.0, 960.0);
+    let width = (ui.available_width() - 260.0).clamp(420.0, 760.0);
+
+    ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect(
+            rect,
+            8.0,
+            palette.surface,
+            Stroke::new(1.0, palette.border),
+            egui::StrokeKind::Inside,
+        );
+
+        let label_width = 58.0;
+        let content_left = rect.left() + label_width;
+        let content_right = rect.right() - 10.0;
+        let pixels_per_minute = rect.height() / total_minutes;
+        let mut hour = day_start.hour();
+        let end_hour = day_end.hour();
+
+        while hour <= end_hour {
+            let Ok(mark) = target_date.with_hms(hour, 0, 0) else {
+                break;
+            };
+            let mark = mark.assume_utc();
+            let y = rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
+            if rect.contains(egui::pos2(content_left, y)) {
+                painter.text(
+                    egui::pos2(rect.left() + 10.0, y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{hour:02}:00"),
+                    egui::FontId::proportional(12.0),
+                    palette.muted,
+                );
+                painter.line_segment(
+                    [egui::pos2(content_left, y), egui::pos2(content_right, y)],
+                    Stroke::new(1.0, palette.faint),
+                );
+            }
+            hour += 1;
+        }
+
+        for block in blocks {
+            draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
+        }
+    });
+}
+
+fn draw_schedule_block(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    block: &ScheduleBlock,
+    palette: Palette,
+) {
+    let label_width = 58.0;
+    let left = rect.left() + label_width + 10.0;
+    let right = rect.right() - 12.0;
+    let pixels_per_minute = rect.height() / total_minutes;
+    let start_minutes = (block.start_at - day_start).whole_minutes() as f32;
+    let end_minutes = (block.end_at - day_start).whole_minutes() as f32;
+    let top = rect
+        .top()
+        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
+    let bottom = rect
+        .bottom()
+        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
+    if bottom <= top {
+        return;
+    }
+
+    let block_rect = egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(right, bottom.max(top + 30.0)),
+    );
+    let (fill, stroke, text_color) = schedule_block_colors(&block.state, palette);
+    painter.rect(
+        block_rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    let title = block
+        .title_snapshot
+        .as_deref()
+        .unwrap_or("(untitled block)");
+    let duration = schedule_block_minutes(block);
+    let label = format!(
+        "{}-{}  {}  {duration}m",
+        format_hm(block.start_at),
+        format_hm(block.end_at),
+        title
+    );
+    painter.text(
+        block_rect.left_top() + egui::vec2(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        label,
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+}
+
+fn schedule_action_panel(
     ui: &mut egui::Ui,
     blocks: &[ScheduleBlock],
     palette: Palette,
 ) -> Option<ScheduleAction> {
     let mut action = None;
-    ScrollArea::vertical().show(ui, |ui| {
-        for block in blocks {
-            ui.horizontal(|ui| {
-                ui.monospace(format!(
-                    "{}-{}",
-                    format_hm(block.start_at),
-                    format_hm(block.end_at)
-                ));
-                ui.label(
-                    block
-                        .title_snapshot
-                        .as_deref()
-                        .unwrap_or("(untitled block)"),
-                );
-                ui.label(regular_text(schedule_state_label(&block.state)).color(palette.success));
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if block.state != ScheduleBlockState::Cancelled && ui.button("Cancel").clicked()
-                    {
-                        action = Some(ScheduleAction::SetState(
-                            block.id.clone(),
-                            ScheduleBlockState::Cancelled,
+    ui.allocate_ui_with_layout(
+        egui::vec2(260.0, 560.0),
+        egui::Layout::top_down(Align::Min),
+        |ui| {
+            ui.label(bold_text("Blocks").color(palette.section));
+            ui.add_space(6.0);
+            ScrollArea::vertical().show(ui, |ui| {
+                for block in blocks {
+                    ui.group(|ui| {
+                        ui.label(bold_text(
+                            block
+                                .title_snapshot
+                                .as_deref()
+                                .unwrap_or("(untitled block)"),
                         ));
-                    }
-                    if block.state != ScheduleBlockState::Done && ui.button("Done").clicked() {
-                        action = Some(ScheduleAction::SetState(
-                            block.id.clone(),
-                            ScheduleBlockState::Done,
-                        ));
-                    }
-                    if block.state == ScheduleBlockState::Proposed
-                        && ui.button("Schedule").clicked()
-                    {
-                        action = Some(ScheduleAction::SetState(
-                            block.id.clone(),
-                            ScheduleBlockState::Scheduled,
-                        ));
-                    }
-                });
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!(
+                                "{}-{}",
+                                format_hm(block.start_at),
+                                format_hm(block.end_at)
+                            ));
+                            ui.label(format!("{}m", schedule_block_minutes(block)));
+                        });
+                        ui.label(
+                            regular_text(schedule_state_label(&block.state))
+                                .color(schedule_state_text_color(&block.state, palette)),
+                        );
+                        ui.horizontal(|ui| {
+                            if block.state == ScheduleBlockState::Proposed
+                                && ui.button("Schedule").clicked()
+                            {
+                                action = Some(ScheduleAction::SetState(
+                                    block.id.clone(),
+                                    ScheduleBlockState::Scheduled,
+                                ));
+                            }
+                            if block.state != ScheduleBlockState::Done
+                                && ui.button("Done").clicked()
+                            {
+                                action = Some(ScheduleAction::SetState(
+                                    block.id.clone(),
+                                    ScheduleBlockState::Done,
+                                ));
+                            }
+                            if block.state != ScheduleBlockState::Cancelled
+                                && ui.button("Cancel").clicked()
+                            {
+                                action = Some(ScheduleAction::SetState(
+                                    block.id.clone(),
+                                    ScheduleBlockState::Cancelled,
+                                ));
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
             });
-            ui.separator();
-        }
-    });
+        },
+    );
     action
+}
+
+fn schedule_bounds(
+    target_date: Date,
+    blocks: &[ScheduleBlock],
+) -> Result<(OffsetDateTime, OffsetDateTime)> {
+    let mut start = target_date.with_hms(9, 0, 0)?.assume_utc();
+    let mut end = target_date.with_hms(17, 0, 0)?.assume_utc();
+    for block in blocks {
+        start = start.min(block.start_at);
+        end = end.max(block.end_at);
+    }
+    Ok((start, end))
+}
+
+fn schedule_block_colors(
+    state: &ScheduleBlockState,
+    palette: Palette,
+) -> (Color32, Color32, Color32) {
+    match state {
+        ScheduleBlockState::Proposed => (palette.selected_fill, palette.accent, palette.text),
+        ScheduleBlockState::Scheduled | ScheduleBlockState::Active => {
+            (palette.control_bg, palette.accent, palette.text)
+        }
+        ScheduleBlockState::Done => (palette.faint, palette.success, palette.success),
+        ScheduleBlockState::Missed => (palette.faint, palette.warning, palette.warning),
+        ScheduleBlockState::Cancelled => (palette.faint, palette.border, palette.muted),
+    }
+}
+
+fn schedule_state_text_color(state: &ScheduleBlockState, palette: Palette) -> Color32 {
+    match state {
+        ScheduleBlockState::Done => palette.success,
+        ScheduleBlockState::Missed => palette.warning,
+        ScheduleBlockState::Cancelled => palette.muted,
+        _ => palette.accent,
+    }
+}
+
+fn schedule_block_minutes(block: &ScheduleBlock) -> i64 {
+    (block.end_at - block.start_at).whole_minutes().max(0)
 }
 
 async fn done_status_ids(
