@@ -11,13 +11,13 @@ use eframe::egui::{
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
     ProposedScheduleBlock, ScheduleBlockCommandService, SchedulePlanStoreService,
-    TaskCommandService, UpdateTaskRequest,
+    TaskCommandService, UpdateScheduleBlockWindowRequest, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
-use time::{Date, OffsetDateTime, macros::format_description};
+use time::{Date, OffsetDateTime, Time, macros::format_description};
 use tokio::runtime::Runtime;
 
 static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
@@ -55,6 +55,7 @@ enum TaskAction {
 
 #[derive(Debug, Clone)]
 enum ScheduleAction {
+    Edit(ScheduleBlockId),
     SetState(ScheduleBlockId, ScheduleBlockState),
 }
 
@@ -338,6 +339,10 @@ struct MnemaGuiApp {
     edit_title: String,
     edit_due_date: String,
     edit_minutes: String,
+    editing_schedule_block_id: Option<ScheduleBlockId>,
+    schedule_edit_start: String,
+    schedule_edit_end: String,
+    confirm_plan_save: bool,
     target_date: String,
     tasks: Vec<Task>,
     plan: Option<PlanTodayResult>,
@@ -384,6 +389,10 @@ impl MnemaGuiApp {
             edit_title: String::new(),
             edit_due_date: String::new(),
             edit_minutes: String::new(),
+            editing_schedule_block_id: None,
+            schedule_edit_start: String::new(),
+            schedule_edit_end: String::new(),
+            confirm_plan_save: false,
             target_date: today,
             tasks: Vec::new(),
             plan: None,
@@ -655,8 +664,86 @@ impl MnemaGuiApp {
         }
     }
 
+    fn start_edit_schedule_block(&mut self, block_id: ScheduleBlockId) {
+        let Some(block) = self.schedule.iter().find(|block| block.id == block_id) else {
+            self.set_error(anyhow!("schedule block not found"));
+            return;
+        };
+        self.editing_schedule_block_id = Some(block.id.clone());
+        self.schedule_edit_start = format_hm(block.start_at);
+        self.schedule_edit_end = format_hm(block.end_at);
+        self.error = None;
+    }
+
+    fn save_schedule_block_edit(&mut self) {
+        let Some(block_id) = self.editing_schedule_block_id.clone() else {
+            return;
+        };
+        let target_date = match parse_required_date(&self.target_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let start_at = match parse_hm_for_date(&self.schedule_edit_start, target_date) {
+            Ok(value) => value,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let end_at = match parse_hm_for_date(&self.schedule_edit_end, target_date) {
+            Ok(value) => value,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+
+        let result = self.runtime.block_on(async move {
+            let schedule_block_repo = vault.schedule_block_repo();
+            let service = ScheduleBlockCommandService::new(schedule_block_repo.as_ref());
+            Result::<ScheduleBlock>::Ok(
+                service
+                    .update_window(UpdateScheduleBlockWindowRequest {
+                        block_id,
+                        start_at,
+                        end_at,
+                    })
+                    .await?,
+            )
+        });
+
+        match result {
+            Ok(block) => {
+                self.message = format!(
+                    "Updated time: {}",
+                    block
+                        .title_snapshot
+                        .as_deref()
+                        .unwrap_or("(untitled block)")
+                );
+                self.error = None;
+                self.clear_schedule_block_editor();
+                self.refresh_schedule();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn clear_schedule_block_editor(&mut self) {
+        self.editing_schedule_block_id = None;
+        self.schedule_edit_start.clear();
+        self.schedule_edit_end.clear();
+    }
+
     fn handle_schedule_action(&mut self, action: ScheduleAction) {
         match action {
+            ScheduleAction::Edit(block_id) => self.start_edit_schedule_block(block_id),
             ScheduleAction::SetState(block_id, state) => {
                 self.update_schedule_block_state(block_id, state)
             }
@@ -780,6 +867,20 @@ impl MnemaGuiApp {
                 }
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn request_save_plan(&mut self) {
+        self.refresh_schedule();
+        let has_replaceable_proposed = self
+            .schedule
+            .iter()
+            .any(|block| block.state == ScheduleBlockState::Proposed);
+        if has_replaceable_proposed {
+            self.confirm_plan_save = true;
+            self.message = String::from("Save will replace existing proposed blocks.");
+        } else {
+            self.plan_today(true);
         }
     }
 
@@ -973,9 +1074,25 @@ impl MnemaGuiApp {
                 self.plan_today(false);
             }
             if ui.button("Save").clicked() {
-                self.plan_today(true);
+                self.request_save_plan();
             }
         });
+        if self.confirm_plan_save {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    palette.warning,
+                    "Existing proposed blocks for this date will be replaced.",
+                );
+                if ui.button("Replace proposed").clicked() {
+                    self.confirm_plan_save = false;
+                    self.plan_today(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_plan_save = false;
+                    self.message = String::from("Save cancelled");
+                }
+            });
+        }
         ui.add_space(12.0);
 
         if let Some(plan) = &self.plan {
@@ -1059,6 +1176,7 @@ impl MnemaGuiApp {
         if let Some(action) = schedule_calendar_view(ui, target_date, &self.schedule, palette) {
             self.handle_schedule_action(action);
         }
+        self.show_schedule_block_editor(ui, palette);
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -1175,6 +1293,42 @@ impl MnemaGuiApp {
             self.save_task_edit();
         } else if cancel {
             self.clear_task_editor();
+        }
+    }
+
+    fn show_schedule_block_editor(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        if self.editing_schedule_block_id.is_none() {
+            return;
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(bold_text("Edit schedule time").color(palette.section));
+        let mut save = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            ui.label("Start");
+            ui.add_sized(
+                [84.0, INPUT_HEIGHT],
+                text_field(&mut self.schedule_edit_start, "HH:MM"),
+            );
+            ui.label("End");
+            ui.add_sized(
+                [84.0, INPUT_HEIGHT],
+                text_field(&mut self.schedule_edit_end, "HH:MM"),
+            );
+            if ui.button("Save").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+
+        if save {
+            self.save_schedule_block_edit();
+        } else if cancel {
+            self.clear_schedule_block_editor();
         }
     }
 }
@@ -1795,6 +1949,9 @@ fn schedule_action_panel(
                                 .color(schedule_state_text_color(&block.state, palette)),
                         );
                         ui.horizontal(|ui| {
+                            if ui.button("Edit").clicked() {
+                                action = Some(ScheduleAction::Edit(block.id.clone()));
+                            }
                             if block.state == ScheduleBlockState::Proposed
                                 && ui.button("Schedule").clicked()
                             {
@@ -1915,6 +2072,11 @@ fn parse_optional_date(value: &str) -> Result<Option<Date>> {
 
 fn parse_required_date(value: &str) -> Result<Date> {
     Date::parse(value.trim(), format_description!("[year]-[month]-[day]")).map_err(Into::into)
+}
+
+fn parse_hm_for_date(value: &str, date: Date) -> Result<OffsetDateTime> {
+    let time = Time::parse(value.trim(), format_description!("[hour]:[minute]"))?;
+    Ok(date.with_time(time).assume_utc())
 }
 
 fn parse_optional_u32(value: &str) -> Result<Option<u32>> {

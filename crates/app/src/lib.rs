@@ -21,6 +21,8 @@ pub enum AppError {
     TaskNotFound,
     #[error("schedule block not found")]
     ScheduleBlockNotFound,
+    #[error("schedule block end must be after start")]
+    InvalidScheduleBlockWindow,
     #[error("missing default inbox list")]
     MissingDefaultInbox,
     #[error("missing default task status")]
@@ -58,6 +60,13 @@ pub struct UpdateTaskRequest {
     pub title: String,
     pub due_date: Option<Date>,
     pub estimated_minutes: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateScheduleBlockWindowRequest {
+    pub block_id: ScheduleBlockId,
+    pub start_at: OffsetDateTime,
+    pub end_at: OffsetDateTime,
 }
 
 pub struct CaptureTaskService<'a> {
@@ -336,6 +345,29 @@ impl<'a> ScheduleBlockCommandService<'a> {
             .await?
             .ok_or(AppError::ScheduleBlockNotFound)?;
         block.state = state;
+        block.updated_at = OffsetDateTime::now_utc();
+        self.schedule_blocks.update(block.clone()).await?;
+        Ok(block)
+    }
+
+    pub async fn update_window(
+        &self,
+        request: UpdateScheduleBlockWindowRequest,
+    ) -> AppResult<ScheduleBlock> {
+        if request.end_at <= request.start_at {
+            return Err(AppError::InvalidScheduleBlockWindow);
+        }
+
+        let mut block = self
+            .schedule_blocks
+            .find(request.block_id)
+            .await?
+            .ok_or(AppError::ScheduleBlockNotFound)?;
+        block.start_at = request.start_at;
+        block.end_at = request.end_at;
+        block.required_minutes = Some((request.end_at - request.start_at).whole_minutes() as u32);
+        block.locked = true;
+        block.source = ScheduleBlockSource::Manual;
         block.updated_at = OffsetDateTime::now_utc();
         self.schedule_blocks.update(block.clone()).await?;
         Ok(block)
@@ -921,6 +953,53 @@ mod tests {
         assert_eq!(
             schedule_blocks.find(block_id).await.unwrap().unwrap().state,
             ScheduleBlockState::Scheduled
+        );
+    }
+
+    #[tokio::test]
+    async fn updates_schedule_block_window_as_manual_locked_block() {
+        let block = ScheduleBlock {
+            id: ScheduleBlockId::new(),
+            task_id: None,
+            title_snapshot: Some("Plan".into()),
+            start_at: datetime!(2026-06-25 09:00 UTC),
+            end_at: datetime!(2026-06-25 09:30 UTC),
+            block_type: ScheduleBlockType::Task,
+            state: ScheduleBlockState::Scheduled,
+            locked: false,
+            source: ScheduleBlockSource::Scheduler,
+            required_minutes: Some(30),
+            created_at: datetime!(2026-06-25 00:00 UTC),
+            updated_at: datetime!(2026-06-25 00:00 UTC),
+        };
+        let block_id = block.id.clone();
+        let schedule_blocks = MemoryScheduleBlockRepository {
+            blocks: Mutex::new(vec![block]),
+        };
+        let service = ScheduleBlockCommandService::new(&schedule_blocks);
+
+        let updated = service
+            .update_window(UpdateScheduleBlockWindowRequest {
+                block_id: block_id.clone(),
+                start_at: datetime!(2026-06-25 10:00 UTC),
+                end_at: datetime!(2026-06-25 11:15 UTC),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated.start_at, datetime!(2026-06-25 10:00 UTC));
+        assert_eq!(updated.end_at, datetime!(2026-06-25 11:15 UTC));
+        assert_eq!(updated.required_minutes, Some(75));
+        assert!(updated.locked);
+        assert_eq!(updated.source, ScheduleBlockSource::Manual);
+        assert_eq!(
+            schedule_blocks
+                .find(block_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .end_at,
+            datetime!(2026-06-25 11:15 UTC)
         );
     }
 
