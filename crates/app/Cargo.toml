@@ -1,0 +1,16 @@
+[package]
+name = "mnema-app"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+mnema-core = { path = "../core" }
+mnema-scheduler = { path = "../scheduler" }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1.48", features = ["macros", "rt"] }

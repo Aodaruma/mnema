@@ -25,6 +25,7 @@ pub trait TaskRepository: Send + Sync {
     async fn insert(&self, task: Task) -> CoreResult<()>;
     async fn find(&self, id: TaskId) -> CoreResult<Option<Task>>;
     async fn update(&self, task: Task) -> CoreResult<()>;
+    async fn list_all(&self) -> CoreResult<Vec<Task>>;
     async fn list_by_project(&self, project_id: ProjectId) -> CoreResult<Vec<Task>>;
     async fn list_by_list(&self, list_id: ListId) -> CoreResult<Vec<Task>>;
     async fn soft_delete(&self, id: TaskId, deleted_at: OffsetDateTime) -> CoreResult<()>;

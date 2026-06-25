@@ -115,6 +115,12 @@ postgres://postgres:postgres@localhost/mnema
 
 DB 統合テストは `MNEMA_TEST_DATABASE_URL` が設定されている場合のみ実DBに接続する。
 
+DB なしでスケジューラのデモを確認する場合:
+
+```bash
+cargo run -p mnema-desktop -- --demo-plan
+```
+
 ---
 
 ## リポジトリ構成（案）

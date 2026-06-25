@@ -134,6 +134,12 @@ postgres://postgres:postgres@localhost/mnema
 Integration tests use `MNEMA_TEST_DATABASE_URL` when it is set; otherwise the
 database-backed tests exit without touching a database.
 
+You can try the scheduler without a database:
+
+```bash
+cargo run -p mnema-desktop -- --demo-plan
+```
+
 ---
 
 ## Repository layout (planned)

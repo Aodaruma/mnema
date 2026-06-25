@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 mnema-core = { path = "../core" }
+mnema-app = { path = "../app" }
 mnema-infra = { path = "../infra" }
 
 serde = { workspace = true }

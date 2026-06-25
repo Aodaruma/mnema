@@ -201,6 +201,24 @@ impl TaskRepository for PostgresTaskRepository {
         Ok(())
     }
 
+    async fn list_all(&self) -> CoreResult<Vec<Task>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM tasks
+            ORDER BY created_at, title
+        "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_task)
+            .map(|r| r.map_err(map_storage_err))
+            .collect()
+    }
+
     async fn list_by_project(&self, project_id: ProjectId) -> CoreResult<Vec<Task>> {
         let rows = sqlx::query(
             r#"

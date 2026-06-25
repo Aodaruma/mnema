@@ -4,6 +4,7 @@ members = [
     "crates/infra",
     "crates/desktop",
     "crates/scheduler",
+    "crates/app",
 ]
 
 resolver = "2"

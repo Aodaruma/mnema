@@ -928,6 +928,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-app"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "mnema-core",
+ "mnema-scheduler",
+ "serde",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "mnema-core"
 version = "0.0.1"
 dependencies = [
@@ -944,6 +957,7 @@ name = "mnema-desktop"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "mnema-app",
  "mnema-core",
  "mnema-infra",
  "serde",
