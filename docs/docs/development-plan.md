@@ -24,7 +24,7 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 3. **Phase 2: 永続化 & Vault 構造（infra-db crate）**
 4. **Phase 3: LLM 抽象レイヤ（infra-llm crate）**
 5. **Phase 4: 自動化 / ジョブ基盤（automation crate）**
-6. **Phase 5: デスクトップ UI のスパイク（desktop crate / Tauri）**
+6. **Phase 5: デスクトップ UI のスパイク（desktop crate / egui）**
 7. **Phase 6: 秘書チャット + 能動通知の MVP**
 8. **Phase 7: 週次レビュー / マイルストーン / 体験の磨き込み**
 
@@ -47,7 +47,7 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
   * ルート `Cargo.toml` に `crates/core`, `crates/infra`, `crates/desktop` などをメンバーとして定義。
 * [ ] `crates/core` の空 crate 追加
 * [ ] `crates/infra` の空 crate 追加（db / llm は将来サブモジュール分割）
-* [ ] `crates/desktop` の空 crate 追加（Tauri / Iced 等は後で決定）
+* [x] `crates/desktop` の空 crate 追加（初期GUIは egui / eframe）
 * [ ] `docs/` 以下に `specification-v0.1.md` と `development-plan.md` を置く
 
 ### 2.3 AI に投げるときのサンプルプロンプト
@@ -210,18 +210,19 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 
 ### 7.1 目的
 
-* まずは **「今日のタスクリストを表示するだけ」** の超小さい UI を動かす。
-* Tauri を本命として、Rust + Web UI の繋ぎ込みを試す。
+* まずは **Inbox / Today / Schedule を触れる** 小さい UI を動かす。
+* 初期スパイクは egui / eframe で進め、Rust の application service と直接つなぐ。
 
 ### 7.2 やること
 
-* [ ] Tauri プロジェクトの初期化（`crates/desktop`）
-* [ ] Vault のパスを選ばせて、今日のタスク一覧を表示するだけの画面
-* [ ] Inbox にタスクを 1 件追加できるフォーム（タイトルのみ）
+* [x] egui / eframe を `crates/desktop` に導入
+* [x] Vault のパスを指定してタスク一覧を表示する画面
+* [x] Inbox にタスクを 1 件追加できるフォーム
+* [x] Today plan を生成し、ScheduleBlock として保存できる画面
 
 ### 7.3 AI に投げるときのサンプルプロンプト
 
-> In the `crates/desktop` crate, initialize a Tauri app that connects to the Mnema core and infra layers. Implement a minimal window that: (1) lets the user choose or create a vault directory, (2) shows today's tasks in a list, and (3) allows adding a new inbox task with only a title.
+> In the `crates/desktop` crate, build an egui / eframe window that connects to the Mnema core and infra layers. Implement a minimal window that: (1) lets the user choose or create a vault directory, (2) shows tasks in a list, (3) allows adding a new inbox task, and (4) can generate and save today's proposed schedule.
 
 ---
 
@@ -250,7 +251,7 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 
 ### 8.3 AI に投げるときのサンプルプロンプト
 
-> Extend the Mnema desktop app to include a sidebar chat UI for an AI "secretary". The chat backend should use the existing LlmClient and core services to: (1) create tasks from natural language, (2) answer "What should I do next?" by ranking tasks, and (3) write any changes to the AutomationLog. Implement this as a Tauri command that the frontend can call.
+> Extend the Mnema desktop app to include a sidebar chat UI for an AI "secretary". The chat backend should use the existing LlmClient and core services to: (1) create tasks from natural language, (2) answer "What should I do next?" by ranking tasks, and (3) write any changes to the AutomationLog. Expose this from the current egui app service boundary first; if the frontend moves to Tauri later, wrap the same service as a Tauri command.
 
 ---
 
@@ -278,7 +279,7 @@ AI に渡すときは、このドキュメントから対象フェーズの部�
 ## 10. 今後の拡張メモ（まだ手をつけないもの）
 
 * クラウド同期サービス（自前サーバ or パーソナルサーバ）
-* モバイルクライアント（Tauri モバイル or 別クライアント）
+* モバイルクライアント（egui mobile / Slint / Tauri mobile / 別クライアントを再評価）
 * Live2D / アニメーションする秘書アバター
 * 高度な CRDT / イベントソーシングによる同期安全性の向上
 

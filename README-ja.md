@@ -90,7 +90,7 @@ Mnema は UX として **手間を増やさない** ことを大事にする:
 ※ 詳細は `docs/specification-v0.1.md` を参照。
 
 - **言語**: Rust（コアロジック / バックエンド）
-- **デスクトップシェル**: 検討中（現時点では Tauri を本命候補として評価中）
+- **デスクトップシェル**: 現在のプロトタイプは egui / eframe。UI 要件が固まった段階で Slint / Tauri も再検討する。
 - **ストレージ**:
   - 既定は SQLite
   - PostgreSQL は `MNEMA_STORAGE_BACKEND=postgres` と `MNEMA_DATABASE_URL` で任意利用
@@ -133,6 +133,12 @@ DB なしでスケジューラのデモを確認する場合:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+現在のデスクトップGUIを起動する場合:
+
+```bash
+cargo run -p mnema-desktop
+```
+
 既定の SQLite backend で試す場合:
 
 ```bash
@@ -160,7 +166,7 @@ mnema/
     core/         # ドメインモデル・サービス
     scheduler/    # 決定的な計画生成・スケジュール提案ロジック
     infra/        # DB, LLM クライアント, 同期周り
-    desktop/      # デスクトップアプリ（Tauri など）
+    desktop/      # デスクトップアプリ / CLI（egui + eframe）
 ```
 
 ------

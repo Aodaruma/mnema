@@ -12,8 +12,9 @@ use time::{
     macros::{datetime, format_description},
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+mod gui;
+
+fn main() -> anyhow::Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -26,16 +27,28 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    match args.first().map(String::as_str) {
-        Some("add") => run_add(&args[1..]).await,
-        Some("list") => run_list(&args[1..]).await,
-        Some("schedule") => run_schedule(&args[1..]).await,
-        Some("plan") | None => run_plan(args.get(1..).unwrap_or_default()).await,
-        Some(path) => {
-            let path_args = vec![path.to_string()];
-            run_plan(&path_args).await
-        }
+    if args.is_empty() {
+        return gui::run_gui(PathBuf::from("./vault"));
     }
+
+    if matches!(args.first().map(String::as_str), Some("gui" | "--gui")) {
+        return gui::run_gui(vault_path_from_args(&args[1..], false));
+    }
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        match args.first().map(String::as_str) {
+            Some("add") => run_add(&args[1..]).await,
+            Some("list") => run_list(&args[1..]).await,
+            Some("schedule") => run_schedule(&args[1..]).await,
+            Some("plan") => run_plan(args.get(1..).unwrap_or_default()).await,
+            Some(path) => {
+                let path_args = vec![path.to_string()];
+                run_plan(&path_args).await
+            }
+            None => unreachable!("empty args are handled before CLI dispatch"),
+        }
+    })
 }
 
 async fn run_plan(args: &[String]) -> anyhow::Result<()> {
@@ -158,9 +171,11 @@ async fn run_list(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn print_help() {
-    println!("Mnema desktop stub");
+    println!("Mnema");
     println!();
     println!("Usage:");
+    println!("  mnema-desktop");
+    println!("  mnema-desktop gui [--vault PATH]");
     println!("  mnema-desktop plan [--save] [--vault PATH]");
     println!("  mnema-desktop add \"Task title\" [--due YYYY-MM-DD] [--minutes N] [--vault PATH]");
     println!("  mnema-desktop list [--vault PATH]");

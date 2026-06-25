@@ -105,7 +105,8 @@ Mnema tries to **reduce** friction, not add more:
 > Draft – see `docs/specification-v0.1.md` for details.
 
 * **Language**: Rust (core logic and backend)
-* **Desktop Shell**: TBD (Tauri is the current favorite; still evaluating)
+* **Desktop Shell**: egui / eframe for the current prototype; Slint or Tauri can
+  be revisited once UI requirements stabilize
 * **Storage**: SQLite by default, optional PostgreSQL via
   `MNEMA_STORAGE_BACKEND=postgres` and `MNEMA_DATABASE_URL`, plus a local vault
   folder for files, assets, exports, and app-local configuration
@@ -154,6 +155,12 @@ You can try the scheduler without a database:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+Launch the current desktop GUI:
+
+```bash
+cargo run -p mnema-desktop
+```
+
 With the default SQLite backend:
 
 ```bash
@@ -181,7 +188,7 @@ mnema/
     core/         # domain models, services
     scheduler/    # deterministic planning and schedule proposal logic
     infra/        # DB, LLM clients, sync
-    desktop/      # desktop app (Tauri / other)
+    desktop/      # desktop app / CLI (egui + eframe)
 ```
 
 ---

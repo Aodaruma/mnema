@@ -14,3 +14,4 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 tokio = { version = "1.48", features = ["full"] }
 time = { workspace = true }
+eframe = "0.34.3"

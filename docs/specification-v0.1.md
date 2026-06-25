@@ -342,7 +342,7 @@ Vault は添付・エクスポート・秘書アセット・ローカル設定�
     - 週次レビュー生成
     - スケジュール提案
 - presentation 層
-  - デスクトップ UI（Tauri + Web フロント想定）
+  - デスクトップ UI（現時点のスパイクは egui / eframe）
 
 ------
 
@@ -350,14 +350,13 @@ Vault は添付・エクスポート・秘書アセット・ローカル設定�
 
 ### 5.1 GUI フレームワーク
 
-- 第一候補: **Tauri 2.x**
-  - Rust バックエンド + Web フロント（Tailwind / React / Svelte など）
-  - UI リッチ化が比較的容易（チャット UI、Gantt、Kanban など）
-  - Android / iOS サポートが公式に視野に入っている
-- 代替案: Iced
-  - バックエンド・フロントとも Rust で完結
-  - デスクトップ特化で安定
-  - 将来的に「全部 Rust に寄せたい」と感じたときの候補
+- 現時点のスパイク: **egui / eframe**
+  - Rust の application service / repository と直接つなぎやすい
+  - desktop と web の両方に寄せやすい
+  - 画面仕様が固まる前の高速な試作に向いている
+- 後続で再検討する候補: Slint / Tauri
+  - Slint は宣言的 UI とタッチ向けの見た目を重視する段階で再検討する
+  - Tauri は Web frontend を本格採用したくなった段階で再検討する
 
 ### 5.2 データ永続化
 
