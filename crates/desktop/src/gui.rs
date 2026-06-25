@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use eframe::egui::{self, Align, Color32, RichText, ScrollArea, Stroke, TextEdit};
+use eframe::egui::{self, Align, Color32, Margin, RichText, ScrollArea, Stroke, TextEdit};
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
     ProposedScheduleBlock, SchedulePlanStoreService,
@@ -504,6 +504,7 @@ struct Palette {
     control_bg: Color32,
     control_hover: Color32,
     control_active: Color32,
+    switch_bg: Color32,
     border: Color32,
     border_strong: Color32,
     accent: Color32,
@@ -579,6 +580,11 @@ impl Palette {
                 Color32::from_rgb(82, 146, 191),
                 t,
             ),
+            switch_bg: mix_color(
+                Color32::from_rgb(224, 231, 239),
+                Color32::from_rgb(18, 25, 36),
+                t,
+            ),
             border: mix_color(
                 Color32::from_rgb(215, 222, 232),
                 Color32::from_rgb(51, 63, 80),
@@ -648,17 +654,25 @@ fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, label: &str) {
 }
 
 fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
-            *dark_mode = false;
-            ui.ctx().set_theme(egui::Theme::Light);
-        }
-        if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
-            *dark_mode = true;
-            ui.ctx().set_theme(egui::Theme::Dark);
-        }
-    });
+    egui::Frame::new()
+        .fill(palette.switch_bg)
+        .stroke(Stroke::new(1.0, palette.border))
+        .corner_radius(18.0)
+        .inner_margin(Margin::symmetric(3, 3))
+        .show(ui, |ui| {
+            ui.set_min_size(egui::vec2(70.0, 30.0));
+            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
+                    *dark_mode = false;
+                    ui.ctx().set_theme(egui::Theme::Light);
+                }
+                if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
+                    *dark_mode = true;
+                    ui.ctx().set_theme(egui::Theme::Dark);
+                }
+            });
+        });
 }
 
 fn theme_icon_button(
