@@ -857,7 +857,6 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
- "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -1726,10 +1725,12 @@ dependencies = [
  "sha2",
  "smallvec",
  "thiserror 2.0.17",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots 0.26.11",
 ]
 
@@ -1809,7 +1810,9 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.17",
+ "time",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -1846,7 +1849,9 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.17",
+ "time",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -1870,8 +1875,10 @@ dependencies = [
  "serde_urlencoded",
  "sqlx-core",
  "thiserror 2.0.17",
+ "time",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

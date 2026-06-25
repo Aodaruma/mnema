@@ -1,45 +1,51 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use sqlx::{SqlitePool, migrate::MigrateDatabase, sqlite::SqliteConnectOptions};
+use sqlx::{PgPool, Postgres, migrate::MigrateDatabase, postgres::PgPoolOptions};
 
 mod defaults;
 
 mod repositories;
 
 pub use repositories::{
-    SqliteListRepository, SqliteMilestoneRepository, SqliteProjectRepository,
-    SqliteStatusRepository, SqliteTaskRepository, SqliteUserSettingsRepository,
+    PostgresListRepository, PostgresMilestoneRepository, PostgresProjectRepository,
+    PostgresStatusRepository, PostgresTaskRepository, PostgresUserSettingsRepository,
 };
 
-/// Vault represents a workspace root that owns a SQLite database.
+const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost/mnema";
+
+/// Vault represents a workspace root plus its PostgreSQL-backed data store.
 #[derive(Clone)]
 pub struct Vault {
     pub root: PathBuf,
-    pub pool: SqlitePool,
+    pub pool: PgPool,
 }
 
 impl Vault {
     pub async fn connect_or_init(root: impl AsRef<Path>) -> Result<Self> {
+        let database_url = std::env::var("MNEMA_DATABASE_URL")
+            .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
+        Self::connect_or_init_with_database_url(root, &database_url).await
+    }
+
+    pub async fn connect_or_init_with_database_url(
+        root: impl AsRef<Path>,
+        database_url: &str,
+    ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
 
-        let db_path = root.join("tasks.sqlite");
-        let db_url = format!("sqlite:{}", db_path.to_string_lossy());
-
-        if !sqlx::Sqlite::database_exists(&db_url)
+        if !Postgres::database_exists(database_url)
             .await
             .unwrap_or(false)
         {
-            sqlx::Sqlite::create_database(&db_url).await?;
+            Postgres::create_database(database_url).await?;
         }
 
-        // Use WAL for better concurrency on desktop apps.
-        let options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        let pool = SqlitePool::connect_with(options).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await?;
 
         sqlx::migrate!("./migrations").run(&pool).await?;
 
@@ -51,27 +57,27 @@ impl Vault {
         defaults::initialize_defaults(&self.pool).await
     }
 
-    pub fn task_repo(&self) -> SqliteTaskRepository {
-        SqliteTaskRepository::new(self.pool.clone())
+    pub fn task_repo(&self) -> PostgresTaskRepository {
+        PostgresTaskRepository::new(self.pool.clone())
     }
 
-    pub fn project_repo(&self) -> SqliteProjectRepository {
-        SqliteProjectRepository::new(self.pool.clone())
+    pub fn project_repo(&self) -> PostgresProjectRepository {
+        PostgresProjectRepository::new(self.pool.clone())
     }
 
-    pub fn list_repo(&self) -> SqliteListRepository {
-        SqliteListRepository::new(self.pool.clone())
+    pub fn list_repo(&self) -> PostgresListRepository {
+        PostgresListRepository::new(self.pool.clone())
     }
 
-    pub fn milestone_repo(&self) -> SqliteMilestoneRepository {
-        SqliteMilestoneRepository::new(self.pool.clone())
+    pub fn milestone_repo(&self) -> PostgresMilestoneRepository {
+        PostgresMilestoneRepository::new(self.pool.clone())
     }
 
-    pub fn status_repo(&self) -> SqliteStatusRepository {
-        SqliteStatusRepository::new(self.pool.clone())
+    pub fn status_repo(&self) -> PostgresStatusRepository {
+        PostgresStatusRepository::new(self.pool.clone())
     }
 
-    pub fn user_settings_repo(&self) -> SqliteUserSettingsRepository {
-        SqliteUserSettingsRepository::new(self.pool.clone())
+    pub fn user_settings_repo(&self) -> PostgresUserSettingsRepository {
+        PostgresUserSettingsRepository::new(self.pool.clone())
     }
 }

@@ -1,8 +1,6 @@
 use anyhow::Result;
 use mnema_core::prelude::*;
-use sqlx::{Row, SqlitePool};
-use time::format_description::well_known::Rfc3339;
-use time::{Date, OffsetDateTime};
+use sqlx::{PgPool, Row};
 
 fn status_group_kind_to_str(kind: &StatusGroupKind) -> &'static str {
     match kind {
@@ -72,21 +70,24 @@ fn milestone_status_from_str(s: &str) -> MilestoneStatus {
     }
 }
 
-fn to_rfc3339(dt: OffsetDateTime) -> Result<String> {
-    dt.format(&Rfc3339).map_err(|e| anyhow::anyhow!(e))
+fn llm_provider_to_string(provider: &LlmProvider) -> String {
+    match provider {
+        LlmProvider::Local => "LOCAL".to_string(),
+        LlmProvider::OpenAiCompatible => "OPEN_AI_COMPATIBLE".to_string(),
+        LlmProvider::Other(s) => format!("OTHER:{s}"),
+    }
 }
 
-fn from_rfc3339(s: &str) -> Result<OffsetDateTime> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|e| anyhow::anyhow!(e))
-}
-
-fn date_to_string(date: Date) -> Result<String> {
-    Ok(date.to_string())
-}
-
-fn date_from_string(s: &str) -> Result<Date> {
-    Date::parse(s, time::macros::format_description!("[year]-[month]-[day]"))
-        .map_err(|e| anyhow::anyhow!(e))
+fn llm_provider_from_string(provider: &str) -> LlmProvider {
+    if provider == "LOCAL" {
+        LlmProvider::Local
+    } else if provider == "OPEN_AI_COMPATIBLE" {
+        LlmProvider::OpenAiCompatible
+    } else if let Some(rest) = provider.strip_prefix("OTHER:") {
+        LlmProvider::Other(rest.to_string())
+    } else {
+        LlmProvider::Local
+    }
 }
 
 fn map_storage_err(e: impl ToString) -> CoreError {
@@ -94,57 +95,44 @@ fn map_storage_err(e: impl ToString) -> CoreError {
 }
 
 #[derive(Clone)]
-pub struct SqliteTaskRepository {
-    pool: SqlitePool,
+pub struct PostgresTaskRepository {
+    pool: PgPool,
 }
 
-impl SqliteTaskRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+impl PostgresTaskRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl TaskRepository for SqliteTaskRepository {
+impl TaskRepository for PostgresTaskRepository {
     async fn insert(&self, task: Task) -> CoreResult<()> {
-        let dependencies = serde_json::to_string(&task.dependencies)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let dependencies = serde_json::to_value(&task.dependencies).map_err(map_storage_err)?;
         sqlx::query(
             r#"
             INSERT INTO tasks (
                 id, title, description, project_id, list_id, status_id,
                 due_date, start_date, estimated_minutes, cost_points, dependencies,
                 milestone_id, created_at, updated_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         "#,
         )
-        .bind(task.id.0.to_string())
+        .bind(task.id.0)
         .bind(task.title)
         .bind(task.description)
-        .bind(task.project_id.map(|p| p.0.to_string()))
-        .bind(task.list_id.map(|l| l.0.to_string()))
-        .bind(task.status_id.0.to_string())
-        .bind(
-            task.due_date
-                .map(|d| date_to_string(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(
-            task.start_date
-                .map(|d| date_to_string(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(task.estimated_minutes.map(|v| v as i64))
-        .bind(task.cost_points.map(|v| v as i64))
+        .bind(task.project_id.map(|p| p.0))
+        .bind(task.list_id.map(|l| l.0))
+        .bind(task.status_id.0)
+        .bind(task.due_date)
+        .bind(task.start_date)
+        .bind(task.estimated_minutes.map(i64::from))
+        .bind(task.cost_points.map(i64::from))
         .bind(dependencies)
-        .bind(task.milestone_id.map(|m| m.0.to_string()))
-        .bind(to_rfc3339(task.created_at).map_err(map_storage_err)?)
-        .bind(to_rfc3339(task.updated_at).map_err(map_storage_err)?)
-        .bind(
-            task.deleted_at
-                .map(|d| to_rfc3339(d).map_err(map_storage_err))
-                .transpose()?,
-        )
+        .bind(task.milestone_id.map(|m| m.0))
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .bind(task.deleted_at)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
@@ -156,51 +144,54 @@ impl TaskRepository for SqliteTaskRepository {
             r#"
             SELECT *
             FROM tasks
-            WHERE id = ?
+            WHERE id = $1
         "#,
         )
-        .bind(id.0.to_string())
+        .bind(id.0)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_storage_err)?;
 
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(row_to_task(row).map_err(map_storage_err)?)),
-        }
+        row.map(row_to_task).transpose().map_err(map_storage_err)
     }
 
     async fn update(&self, task: Task) -> CoreResult<()> {
-        let dependencies = serde_json::to_string(&task.dependencies)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let dependencies = serde_json::to_value(&task.dependencies).map_err(map_storage_err)?;
         let rows = sqlx::query(
             r#"
             UPDATE tasks SET
-                title = ?, description = ?, project_id = ?, list_id = ?, status_id = ?,
-                due_date = ?, start_date = ?, estimated_minutes = ?, cost_points = ?, dependencies = ?,
-                milestone_id = ?, created_at = ?, updated_at = ?, deleted_at = ?
-            WHERE id = ?
+                title = $1,
+                description = $2,
+                project_id = $3,
+                list_id = $4,
+                status_id = $5,
+                due_date = $6,
+                start_date = $7,
+                estimated_minutes = $8,
+                cost_points = $9,
+                dependencies = $10,
+                milestone_id = $11,
+                created_at = $12,
+                updated_at = $13,
+                deleted_at = $14
+            WHERE id = $15
         "#,
         )
         .bind(task.title)
         .bind(task.description)
-        .bind(task.project_id.map(|p| p.0.to_string()))
-        .bind(task.list_id.map(|l| l.0.to_string()))
-        .bind(task.status_id.0.to_string())
-        .bind(task.due_date.map(|d| date_to_string(d).map_err(map_storage_err)).transpose()?)
-        .bind(task.start_date.map(|d| date_to_string(d).map_err(map_storage_err)).transpose()?)
-        .bind(task.estimated_minutes.map(|v| v as i64))
-        .bind(task.cost_points.map(|v| v as i64))
+        .bind(task.project_id.map(|p| p.0))
+        .bind(task.list_id.map(|l| l.0))
+        .bind(task.status_id.0)
+        .bind(task.due_date)
+        .bind(task.start_date)
+        .bind(task.estimated_minutes.map(i64::from))
+        .bind(task.cost_points.map(i64::from))
         .bind(dependencies)
-        .bind(task.milestone_id.map(|m| m.0.to_string()))
-        .bind(to_rfc3339(task.created_at).map_err(map_storage_err)?)
-        .bind(to_rfc3339(task.updated_at).map_err(map_storage_err)?)
-        .bind(
-            task.deleted_at
-                .map(|d| to_rfc3339(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(task.id.0.to_string())
+        .bind(task.milestone_id.map(|m| m.0))
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .bind(task.deleted_at)
+        .bind(task.id.0)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
@@ -213,39 +204,45 @@ impl TaskRepository for SqliteTaskRepository {
     async fn list_by_project(&self, project_id: ProjectId) -> CoreResult<Vec<Task>> {
         let rows = sqlx::query(
             r#"
-            SELECT * FROM tasks WHERE project_id = ?
+            SELECT *
+            FROM tasks
+            WHERE project_id = $1
         "#,
         )
-        .bind(project_id.0.to_string())
+        .bind(project_id.0)
         .fetch_all(&self.pool)
         .await
         .map_err(map_storage_err)?;
 
         rows.into_iter()
-            .map(|row| row_to_task(row).map_err(map_storage_err))
+            .map(row_to_task)
+            .map(|r| r.map_err(map_storage_err))
             .collect()
     }
 
     async fn list_by_list(&self, list_id: ListId) -> CoreResult<Vec<Task>> {
         let rows = sqlx::query(
             r#"
-            SELECT * FROM tasks WHERE list_id = ?
+            SELECT *
+            FROM tasks
+            WHERE list_id = $1
         "#,
         )
-        .bind(list_id.0.to_string())
+        .bind(list_id.0)
         .fetch_all(&self.pool)
         .await
         .map_err(map_storage_err)?;
 
         rows.into_iter()
-            .map(|row| row_to_task(row).map_err(map_storage_err))
+            .map(row_to_task)
+            .map(|r| r.map_err(map_storage_err))
             .collect()
     }
 
-    async fn soft_delete(&self, id: TaskId, deleted_at: OffsetDateTime) -> CoreResult<()> {
-        let res = sqlx::query("UPDATE tasks SET deleted_at = ? WHERE id = ?")
-            .bind(to_rfc3339(deleted_at).map_err(map_storage_err)?)
-            .bind(id.0.to_string())
+    async fn soft_delete(&self, id: TaskId, deleted_at: time::OffsetDateTime) -> CoreResult<()> {
+        let res = sqlx::query("UPDATE tasks SET deleted_at = $1 WHERE id = $2")
+            .bind(deleted_at)
+            .bind(id.0)
             .execute(&self.pool)
             .await
             .map_err(map_storage_err)?;
@@ -256,40 +253,23 @@ impl TaskRepository for SqliteTaskRepository {
     }
 }
 
-fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
-    let dependency_ids: Vec<uuid::Uuid> =
-        serde_json::from_str(row.try_get::<String, _>("dependencies")?.as_str())?;
-    let dependencies: Vec<TaskId> = dependency_ids.into_iter().map(TaskId::from).collect();
+fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task> {
+    let dependencies_value: serde_json::Value = row.try_get("dependencies")?;
+    let dependencies: Vec<TaskId> = serde_json::from_value(dependencies_value)?;
 
     Ok(Task {
-        id: TaskId::from(uuid::Uuid::parse_str(
-            row.try_get::<String, _>("id")?.as_str(),
-        )?),
+        id: TaskId::from(row.try_get::<uuid::Uuid, _>("id")?),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
         project_id: row
-            .try_get::<Option<String>, _>("project_id")?
-            .map(|s| uuid::Uuid::parse_str(&s))
-            .transpose()?
+            .try_get::<Option<uuid::Uuid>, _>("project_id")?
             .map(ProjectId::from),
         list_id: row
-            .try_get::<Option<String>, _>("list_id")?
-            .map(|s| uuid::Uuid::parse_str(&s))
-            .transpose()?
+            .try_get::<Option<uuid::Uuid>, _>("list_id")?
             .map(ListId::from),
-        status_id: StatusId::from(uuid::Uuid::parse_str(
-            row.try_get::<String, _>("status_id")?.as_str(),
-        )?),
-        due_date: row
-            .try_get::<Option<String>, _>("due_date")?
-            .as_deref()
-            .map(date_from_string)
-            .transpose()?,
-        start_date: row
-            .try_get::<Option<String>, _>("start_date")?
-            .as_deref()
-            .map(date_from_string)
-            .transpose()?,
+        status_id: StatusId::from(row.try_get::<uuid::Uuid, _>("status_id")?),
+        due_date: row.try_get("due_date")?,
+        start_date: row.try_get("start_date")?,
         estimated_minutes: row
             .try_get::<Option<i64>, _>("estimated_minutes")?
             .map(|v| v as u32),
@@ -298,56 +278,42 @@ fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .map(|v| v as u32),
         dependencies,
         milestone_id: row
-            .try_get::<Option<String>, _>("milestone_id")?
-            .map(|s| uuid::Uuid::parse_str(&s))
-            .transpose()?
+            .try_get::<Option<uuid::Uuid>, _>("milestone_id")?
             .map(MilestoneId::from),
-        created_at: from_rfc3339(row.try_get::<String, _>("created_at")?.as_str())?,
-        updated_at: from_rfc3339(row.try_get::<String, _>("updated_at")?.as_str())?,
-        deleted_at: row
-            .try_get::<Option<String>, _>("deleted_at")?
-            .as_deref()
-            .map(from_rfc3339)
-            .transpose()?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        deleted_at: row.try_get("deleted_at")?,
     })
 }
 
 #[derive(Clone)]
-pub struct SqliteProjectRepository {
-    pool: SqlitePool,
+pub struct PostgresProjectRepository {
+    pool: PgPool,
 }
 
-impl SqliteProjectRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+impl PostgresProjectRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl ProjectRepository for SqliteProjectRepository {
+impl ProjectRepository for PostgresProjectRepository {
     async fn insert(&self, project: Project) -> CoreResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO projects (id, title, description, start_date, end_date, default_status_set_id, archived_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO projects (
+                id, title, description, start_date, end_date, default_status_set_id, archived_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
         )
-        .bind(project.id.0.to_string())
+        .bind(project.id.0)
         .bind(project.title)
         .bind(project.description)
-        .bind(project.start_date.map(|d| date_to_string(d).map_err(map_storage_err)).transpose()?)
-        .bind(project.end_date.map(|d| date_to_string(d).map_err(map_storage_err)).transpose()?)
-        .bind(
-            project
-                .default_status_set_id
-                .map(|id| id.0.to_string()),
-        )
-        .bind(
-            project
-                .archived_at
-                .map(|d| to_rfc3339(d).map_err(map_storage_err))
-                .transpose()?,
-        )
+        .bind(project.start_date)
+        .bind(project.end_date)
+        .bind(project.default_status_set_id.map(|id| id.0))
+        .bind(project.archived_at)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
@@ -355,167 +321,95 @@ impl ProjectRepository for SqliteProjectRepository {
     }
 
     async fn find(&self, id: ProjectId) -> CoreResult<Option<Project>> {
-        let row = sqlx::query("SELECT * FROM projects WHERE id = ?")
-            .bind(id.0.to_string())
+        let row = sqlx::query("SELECT * FROM projects WHERE id = $1")
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_storage_err)?;
 
-        let project = row
-            .map(|row| -> Result<Project> {
-                Ok(Project {
-                    id: ProjectId::from(uuid::Uuid::parse_str(
-                        row.try_get::<String, _>("id")?.as_str(),
-                    )?),
-                    title: row.try_get("title")?,
-                    description: row.try_get("description")?,
-                    start_date: row
-                        .try_get::<Option<String>, _>("start_date")?
-                        .as_deref()
-                        .map(date_from_string)
-                        .transpose()?,
-                    end_date: row
-                        .try_get::<Option<String>, _>("end_date")?
-                        .as_deref()
-                        .map(date_from_string)
-                        .transpose()?,
-                    default_status_set_id: row
-                        .try_get::<Option<String>, _>("default_status_set_id")?
-                        .map(|s| uuid::Uuid::parse_str(&s))
-                        .transpose()?
-                        .map(StatusGroupId::from),
-                    archived_at: row
-                        .try_get::<Option<String>, _>("archived_at")?
-                        .as_deref()
-                        .map(from_rfc3339)
-                        .transpose()?,
-                })
-            })
-            .transpose()
-            .map_err(map_storage_err)?;
-
-        Ok(project)
+        row.map(row_to_project).transpose().map_err(map_storage_err)
     }
 
     async fn list_all(&self) -> CoreResult<Vec<Project>> {
-        let rows = sqlx::query("SELECT * FROM projects")
+        let rows = sqlx::query("SELECT * FROM projects ORDER BY title")
             .fetch_all(&self.pool)
             .await
             .map_err(map_storage_err)?;
 
-        let mut projects = Vec::new();
-        for row in rows {
-            let id = uuid::Uuid::parse_str(
-                row.try_get::<String, _>("id")
-                    .map_err(map_storage_err)?
-                    .as_str(),
-            )
-            .map_err(map_storage_err)?;
-            let title = row.try_get("title").map_err(map_storage_err)?;
-            let description = row.try_get("description").map_err(map_storage_err)?;
-            let start_date = row
-                .try_get::<Option<String>, _>("start_date")
-                .map_err(map_storage_err)?
-                .as_deref()
-                .map(date_from_string)
-                .transpose()
-                .map_err(map_storage_err)?;
-            let end_date = row
-                .try_get::<Option<String>, _>("end_date")
-                .map_err(map_storage_err)?
-                .as_deref()
-                .map(date_from_string)
-                .transpose()
-                .map_err(map_storage_err)?;
-            let default_status_set_id = row
-                .try_get::<Option<String>, _>("default_status_set_id")
-                .map_err(map_storage_err)?
-                .map(|s| uuid::Uuid::parse_str(&s).map_err(map_storage_err))
-                .transpose()?
-                .map(StatusGroupId::from);
-            let archived_at = row
-                .try_get::<Option<String>, _>("archived_at")
-                .map_err(map_storage_err)?
-                .as_deref()
-                .map(from_rfc3339)
-                .transpose()
-                .map_err(map_storage_err)?;
-
-            projects.push(Project {
-                id: ProjectId::from(id),
-                title,
-                description,
-                start_date,
-                end_date,
-                default_status_set_id,
-                archived_at,
-            });
-        }
-        Ok(projects)
+        rows.into_iter()
+            .map(row_to_project)
+            .map(|r| r.map_err(map_storage_err))
+            .collect()
     }
 
     async fn update(&self, project: Project) -> CoreResult<()> {
-        sqlx::query(
+        let rows = sqlx::query(
             r#"
             UPDATE projects SET
-                title = ?, description = ?, start_date = ?, end_date = ?,
-                default_status_set_id = ?, archived_at = ?
-            WHERE id = ?
+                title = $1,
+                description = $2,
+                start_date = $3,
+                end_date = $4,
+                default_status_set_id = $5,
+                archived_at = $6
+            WHERE id = $7
         "#,
         )
         .bind(project.title)
         .bind(project.description)
-        .bind(
-            project
-                .start_date
-                .map(|d| date_to_string(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(
-            project
-                .end_date
-                .map(|d| date_to_string(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(project.default_status_set_id.map(|id| id.0.to_string()))
-        .bind(
-            project
-                .archived_at
-                .map(|d| to_rfc3339(d).map_err(map_storage_err))
-                .transpose()?,
-        )
-        .bind(project.id.0.to_string())
+        .bind(project.start_date)
+        .bind(project.end_date)
+        .bind(project.default_status_set_id.map(|id| id.0))
+        .bind(project.archived_at)
+        .bind(project.id.0)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
+        if rows.rows_affected() == 0 {
+            return Err(CoreError::NotFound);
+        }
         Ok(())
     }
 }
 
-#[derive(Clone)]
-pub struct SqliteListRepository {
-    pool: SqlitePool,
+fn row_to_project(row: sqlx::postgres::PgRow) -> Result<Project> {
+    Ok(Project {
+        id: ProjectId::from(row.try_get::<uuid::Uuid, _>("id")?),
+        title: row.try_get("title")?,
+        description: row.try_get("description")?,
+        start_date: row.try_get("start_date")?,
+        end_date: row.try_get("end_date")?,
+        default_status_set_id: row
+            .try_get::<Option<uuid::Uuid>, _>("default_status_set_id")?
+            .map(StatusGroupId::from),
+        archived_at: row.try_get("archived_at")?,
+    })
 }
 
-impl SqliteListRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+#[derive(Clone)]
+pub struct PostgresListRepository {
+    pool: PgPool,
+}
+
+impl PostgresListRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl ListRepository for SqliteListRepository {
+impl ListRepository for PostgresListRepository {
     async fn insert(&self, list: List) -> CoreResult<()> {
         sqlx::query(
             r#"
             INSERT INTO lists (id, project_id, name, is_system, kind, view_type, "order")
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
         )
-        .bind(list.id.0.to_string())
-        .bind(list.project_id.map(|p| p.0.to_string()))
+        .bind(list.id.0)
+        .bind(list.project_id.map(|p| p.0))
         .bind(list.name)
-        .bind(if list.is_system { 1 } else { 0 })
+        .bind(list.is_system)
         .bind(list_kind_to_str(&list.kind))
         .bind(list_view_to_str(&list.view_type))
         .bind(list.order)
@@ -526,18 +420,18 @@ impl ListRepository for SqliteListRepository {
     }
 
     async fn find(&self, id: ListId) -> CoreResult<Option<List>> {
-        let row = sqlx::query("SELECT * FROM lists WHERE id = ?")
-            .bind(id.0.to_string())
+        let row = sqlx::query("SELECT * FROM lists WHERE id = $1")
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_storage_err)?;
 
-        Ok(row.map(row_to_list).transpose().map_err(map_storage_err)?)
+        row.map(row_to_list).transpose().map_err(map_storage_err)
     }
 
     async fn list_by_project(&self, project_id: ProjectId) -> CoreResult<Vec<List>> {
-        let rows = sqlx::query("SELECT * FROM lists WHERE project_id = ?")
-            .bind(project_id.0.to_string())
+        let rows = sqlx::query(r#"SELECT * FROM lists WHERE project_id = $1 ORDER BY "order""#)
+            .bind(project_id.0)
             .fetch_all(&self.pool)
             .await
             .map_err(map_storage_err)?;
@@ -548,7 +442,7 @@ impl ListRepository for SqliteListRepository {
     }
 
     async fn list_system(&self) -> CoreResult<Vec<List>> {
-        let rows = sqlx::query("SELECT * FROM lists WHERE is_system = 1")
+        let rows = sqlx::query(r#"SELECT * FROM lists WHERE is_system = TRUE ORDER BY "order""#)
             .fetch_all(&self.pool)
             .await
             .map_err(map_storage_err)?;
@@ -559,84 +453,84 @@ impl ListRepository for SqliteListRepository {
     }
 
     async fn update(&self, list: List) -> CoreResult<()> {
-        sqlx::query(
+        let rows = sqlx::query(
             r#"
             UPDATE lists SET
-                project_id = ?, name = ?, is_system = ?, kind = ?, view_type = ?, "order" = ?
-            WHERE id = ?
+                project_id = $1,
+                name = $2,
+                is_system = $3,
+                kind = $4,
+                view_type = $5,
+                "order" = $6
+            WHERE id = $7
         "#,
         )
-        .bind(list.project_id.map(|p| p.0.to_string()))
+        .bind(list.project_id.map(|p| p.0))
         .bind(list.name)
-        .bind(if list.is_system { 1 } else { 0 })
+        .bind(list.is_system)
         .bind(list_kind_to_str(&list.kind))
         .bind(list_view_to_str(&list.view_type))
         .bind(list.order)
-        .bind(list.id.0.to_string())
+        .bind(list.id.0)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
+        if rows.rows_affected() == 0 {
+            return Err(CoreError::NotFound);
+        }
         Ok(())
     }
 }
 
-fn row_to_list(row: sqlx::sqlite::SqliteRow) -> Result<List> {
+fn row_to_list(row: sqlx::postgres::PgRow) -> Result<List> {
     let kind_str: String = row.try_get("kind")?;
     let view_str: String = row.try_get("view_type")?;
-    let kind = list_kind_from_str(&kind_str);
-    let view_type = list_view_from_str(&view_str);
 
     Ok(List {
-        id: ListId::from(uuid::Uuid::parse_str(
-            row.try_get::<String, _>("id")?.as_str(),
-        )?),
+        id: ListId::from(row.try_get::<uuid::Uuid, _>("id")?),
         project_id: row
-            .try_get::<Option<String>, _>("project_id")?
-            .map(|s| uuid::Uuid::parse_str(&s))
-            .transpose()?
+            .try_get::<Option<uuid::Uuid>, _>("project_id")?
             .map(ProjectId::from),
         name: row.try_get("name")?,
-        is_system: row.try_get::<i64, _>("is_system")? != 0,
-        kind,
-        view_type,
-        order: row.try_get::<i64, _>("order")? as i32,
+        is_system: row.try_get("is_system")?,
+        kind: list_kind_from_str(&kind_str),
+        view_type: list_view_from_str(&view_str),
+        order: row.try_get("order")?,
     })
 }
 
 #[derive(Clone)]
-pub struct SqliteMilestoneRepository {
-    pool: SqlitePool,
+pub struct PostgresMilestoneRepository {
+    pool: PgPool,
 }
 
-impl SqliteMilestoneRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+impl PostgresMilestoneRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl MilestoneRepository for SqliteMilestoneRepository {
+impl MilestoneRepository for PostgresMilestoneRepository {
     async fn insert(&self, milestone: Milestone) -> CoreResult<()> {
-        let deps = serde_json::to_string(&milestone.dependency_task_ids)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let deps = serde_json::to_value(&milestone.dependency_task_ids).map_err(map_storage_err)?;
         sqlx::query(
             r#"
             INSERT INTO milestones (
                 id, project_id, title, description, target_date, status,
                 dependency_task_ids, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
         )
-        .bind(milestone.id.0.to_string())
-        .bind(milestone.project_id.0.to_string())
+        .bind(milestone.id.0)
+        .bind(milestone.project_id.0)
         .bind(milestone.title)
         .bind(milestone.description)
-        .bind(date_to_string(milestone.target_date).map_err(map_storage_err)?)
+        .bind(milestone.target_date)
         .bind(milestone_status_to_str(&milestone.status))
         .bind(deps)
-        .bind(to_rfc3339(milestone.created_at).map_err(map_storage_err)?)
-        .bind(to_rfc3339(milestone.updated_at).map_err(map_storage_err)?)
+        .bind(milestone.created_at)
+        .bind(milestone.updated_at)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
@@ -644,24 +538,24 @@ impl MilestoneRepository for SqliteMilestoneRepository {
     }
 
     async fn find(&self, id: MilestoneId) -> CoreResult<Option<Milestone>> {
-        let row = sqlx::query("SELECT * FROM milestones WHERE id = ?")
-            .bind(id.0.to_string())
+        let row = sqlx::query("SELECT * FROM milestones WHERE id = $1")
+            .bind(id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_storage_err)?;
 
-        Ok(row
-            .map(row_to_milestone)
+        row.map(row_to_milestone)
             .transpose()
-            .map_err(map_storage_err)?)
+            .map_err(map_storage_err)
     }
 
     async fn list_by_project(&self, project_id: ProjectId) -> CoreResult<Vec<Milestone>> {
-        let rows = sqlx::query("SELECT * FROM milestones WHERE project_id = ?")
-            .bind(project_id.0.to_string())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_storage_err)?;
+        let rows =
+            sqlx::query("SELECT * FROM milestones WHERE project_id = $1 ORDER BY target_date")
+                .bind(project_id.0)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_storage_err)?;
         rows.into_iter()
             .map(row_to_milestone)
             .map(|r| r.map_err(map_storage_err))
@@ -669,76 +563,79 @@ impl MilestoneRepository for SqliteMilestoneRepository {
     }
 
     async fn update(&self, milestone: Milestone) -> CoreResult<()> {
-        let deps = serde_json::to_string(&milestone.dependency_task_ids)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        sqlx::query(
+        let deps = serde_json::to_value(&milestone.dependency_task_ids).map_err(map_storage_err)?;
+        let rows = sqlx::query(
             r#"
             UPDATE milestones SET
-                project_id = ?, title = ?, description = ?, target_date = ?, status = ?,
-                dependency_task_ids = ?, created_at = ?, updated_at = ?
-            WHERE id = ?
+                project_id = $1,
+                title = $2,
+                description = $3,
+                target_date = $4,
+                status = $5,
+                dependency_task_ids = $6,
+                created_at = $7,
+                updated_at = $8
+            WHERE id = $9
         "#,
         )
-        .bind(milestone.project_id.0.to_string())
+        .bind(milestone.project_id.0)
         .bind(milestone.title)
         .bind(milestone.description)
-        .bind(date_to_string(milestone.target_date).map_err(map_storage_err)?)
+        .bind(milestone.target_date)
         .bind(milestone_status_to_str(&milestone.status))
         .bind(deps)
-        .bind(to_rfc3339(milestone.created_at).map_err(map_storage_err)?)
-        .bind(to_rfc3339(milestone.updated_at).map_err(map_storage_err)?)
-        .bind(milestone.id.0.to_string())
+        .bind(milestone.created_at)
+        .bind(milestone.updated_at)
+        .bind(milestone.id.0)
         .execute(&self.pool)
         .await
         .map_err(map_storage_err)?;
+        if rows.rows_affected() == 0 {
+            return Err(CoreError::NotFound);
+        }
         Ok(())
     }
 }
 
-fn row_to_milestone(row: sqlx::sqlite::SqliteRow) -> Result<Milestone> {
-    let dep_ids: Vec<uuid::Uuid> =
-        serde_json::from_str(row.try_get::<String, _>("dependency_task_ids")?.as_str())?;
-    let deps: Vec<TaskId> = dep_ids.into_iter().map(TaskId::from).collect();
+fn row_to_milestone(row: sqlx::postgres::PgRow) -> Result<Milestone> {
+    let deps_value: serde_json::Value = row.try_get("dependency_task_ids")?;
+    let dependency_task_ids: Vec<TaskId> = serde_json::from_value(deps_value)?;
     let status_str: String = row.try_get("status")?;
-    let status = milestone_status_from_str(&status_str);
+
     Ok(Milestone {
-        id: MilestoneId::from(uuid::Uuid::parse_str(
-            row.try_get::<String, _>("id")?.as_str(),
-        )?),
-        project_id: ProjectId::from(uuid::Uuid::parse_str(
-            row.try_get::<String, _>("project_id")?.as_str(),
-        )?),
+        id: MilestoneId::from(row.try_get::<uuid::Uuid, _>("id")?),
+        project_id: ProjectId::from(row.try_get::<uuid::Uuid, _>("project_id")?),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
-        target_date: date_from_string(row.try_get::<String, _>("target_date")?.as_str())?,
-        status,
-        dependency_task_ids: deps,
-        created_at: from_rfc3339(row.try_get::<String, _>("created_at")?.as_str())?,
-        updated_at: from_rfc3339(row.try_get::<String, _>("updated_at")?.as_str())?,
+        target_date: row.try_get("target_date")?,
+        status: milestone_status_from_str(&status_str),
+        dependency_task_ids,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
 #[derive(Clone)]
-pub struct SqliteStatusRepository {
-    pool: SqlitePool,
+pub struct PostgresStatusRepository {
+    pool: PgPool,
 }
 
-impl SqliteStatusRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+impl PostgresStatusRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl StatusRepository for SqliteStatusRepository {
+impl StatusRepository for PostgresStatusRepository {
     async fn insert_group(&self, group: StatusGroup) -> CoreResult<()> {
         sqlx::query(
             r#"
             INSERT INTO status_groups (id, name, kind)
-            VALUES (?, ?, ?)
+            VALUES ($1, $2, $3)
         "#,
         )
-        .bind(group.id.0.to_string())
+        .bind(group.id.0)
         .bind(group.name)
         .bind(status_group_kind_to_str(&group.kind))
         .execute(&self.pool)
@@ -751,13 +648,13 @@ impl StatusRepository for SqliteStatusRepository {
         sqlx::query(
             r#"
             INSERT INTO statuses (id, project_id, name, group_id, "order")
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
         "#,
         )
-        .bind(status.id.0.to_string())
-        .bind(status.project_id.map(|p| p.0.to_string()))
+        .bind(status.id.0)
+        .bind(status.project_id.map(|p| p.0))
         .bind(status.name)
-        .bind(status.group_id.0.to_string())
+        .bind(status.group_id.0)
         .bind(status.order)
         .execute(&self.pool)
         .await
@@ -766,7 +663,7 @@ impl StatusRepository for SqliteStatusRepository {
     }
 
     async fn list_groups(&self) -> CoreResult<Vec<StatusGroup>> {
-        let rows = sqlx::query("SELECT * FROM status_groups")
+        let rows = sqlx::query("SELECT * FROM status_groups ORDER BY name")
             .fetch_all(&self.pool)
             .await
             .map_err(map_storage_err)?;
@@ -774,18 +671,13 @@ impl StatusRepository for SqliteStatusRepository {
         let mut groups = Vec::new();
         for row in rows {
             let kind_str: String = row.try_get("kind").map_err(map_storage_err)?;
-            let kind = status_kind_from_str(&kind_str);
-            let id = uuid::Uuid::parse_str(
-                row.try_get::<String, _>("id")
-                    .map_err(map_storage_err)?
-                    .as_str(),
-            )
-            .map_err(map_storage_err)?;
-            let name = row.try_get("name").map_err(map_storage_err)?;
             groups.push(StatusGroup {
-                id: StatusGroupId::from(id),
-                name,
-                kind,
+                id: StatusGroupId::from(
+                    row.try_get::<uuid::Uuid, _>("id")
+                        .map_err(map_storage_err)?,
+                ),
+                name: row.try_get("name").map_err(map_storage_err)?,
+                kind: status_kind_from_str(&kind_str),
             });
         }
         Ok(groups)
@@ -796,46 +688,38 @@ impl StatusRepository for SqliteStatusRepository {
         project_id: Option<ProjectId>,
     ) -> CoreResult<Vec<Status>> {
         let rows = match project_id {
-            Some(pid) => sqlx::query("SELECT * FROM statuses WHERE project_id = ?")
-                .bind(pid.0.to_string())
-                .fetch_all(&self.pool)
-                .await
-                .map_err(map_storage_err)?,
-            None => sqlx::query("SELECT * FROM statuses WHERE project_id IS NULL")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(map_storage_err)?,
+            Some(pid) => {
+                sqlx::query(r#"SELECT * FROM statuses WHERE project_id = $1 ORDER BY "order""#)
+                    .bind(pid.0)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_storage_err)?
+            }
+            None => {
+                sqlx::query(r#"SELECT * FROM statuses WHERE project_id IS NULL ORDER BY "order""#)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(map_storage_err)?
+            }
         };
 
         let mut statuses = Vec::new();
         for row in rows {
-            let id = uuid::Uuid::parse_str(
-                row.try_get::<String, _>("id")
-                    .map_err(map_storage_err)?
-                    .as_str(),
-            )
-            .map_err(map_storage_err)?;
-            let project_id = row
-                .try_get::<Option<String>, _>("project_id")
-                .map_err(map_storage_err)?
-                .map(|s| uuid::Uuid::parse_str(&s).map_err(map_storage_err))
-                .transpose()?
-                .map(ProjectId::from);
-            let name = row.try_get("name").map_err(map_storage_err)?;
-            let group_id = uuid::Uuid::parse_str(
-                row.try_get::<String, _>("group_id")
-                    .map_err(map_storage_err)?
-                    .as_str(),
-            )
-            .map_err(map_storage_err)?;
-            let order = row.try_get::<i64, _>("order").map_err(map_storage_err)? as i32;
-
             statuses.push(Status {
-                id: StatusId::from(id),
-                project_id,
-                name,
-                group_id: StatusGroupId::from(group_id),
-                order,
+                id: StatusId::from(
+                    row.try_get::<uuid::Uuid, _>("id")
+                        .map_err(map_storage_err)?,
+                ),
+                project_id: row
+                    .try_get::<Option<uuid::Uuid>, _>("project_id")
+                    .map_err(map_storage_err)?
+                    .map(ProjectId::from),
+                name: row.try_get("name").map_err(map_storage_err)?,
+                group_id: StatusGroupId::from(
+                    row.try_get::<uuid::Uuid, _>("group_id")
+                        .map_err(map_storage_err)?,
+                ),
+                order: row.try_get("order").map_err(map_storage_err)?,
             });
         }
         Ok(statuses)
@@ -843,27 +727,26 @@ impl StatusRepository for SqliteStatusRepository {
 }
 
 #[derive(Clone)]
-pub struct SqliteUserSettingsRepository {
-    pool: SqlitePool,
+pub struct PostgresUserSettingsRepository {
+    pool: PgPool,
 }
 
-impl SqliteUserSettingsRepository {
-    pub fn new(pool: SqlitePool) -> Self {
+impl PostgresUserSettingsRepository {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait::async_trait]
-impl UserSettingsRepository for SqliteUserSettingsRepository {
+impl UserSettingsRepository for PostgresUserSettingsRepository {
     async fn upsert(&self, settings: UserSettings) -> CoreResult<()> {
-        let automation = serde_json::to_string(&settings.automation)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-        let weekly = serde_json::to_string(&settings.weekly_review)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let automation = serde_json::to_value(&settings.automation).map_err(map_storage_err)?;
+        let weekly = serde_json::to_value(&settings.weekly_review).map_err(map_storage_err)?;
         sqlx::query(
             r#"
-            INSERT INTO user_settings (user_id, provider, model_for_planning, model_for_routine, automation, weekly_review)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO user_settings (
+                user_id, provider, model_for_planning, model_for_routine, automation, weekly_review
+            ) VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT(user_id) DO UPDATE SET
                 provider = excluded.provider,
                 model_for_planning = excluded.model_for_planning,
@@ -872,12 +755,8 @@ impl UserSettingsRepository for SqliteUserSettingsRepository {
                 weekly_review = excluded.weekly_review
         "#,
         )
-        .bind(settings.user_id.0.to_string())
-        .bind(match settings.provider {
-            LlmProvider::Local => "LOCAL".to_string(),
-            LlmProvider::OpenAiCompatible => "OPEN_AI_COMPATIBLE".to_string(),
-            LlmProvider::Other(ref s) => format!("OTHER:{}", s),
-        })
+        .bind(settings.user_id.0)
+        .bind(llm_provider_to_string(&settings.provider))
         .bind(settings.model_for_planning)
         .bind(settings.model_for_routine)
         .bind(automation)
@@ -889,40 +768,27 @@ impl UserSettingsRepository for SqliteUserSettingsRepository {
     }
 
     async fn get(&self, user_id: UserId) -> CoreResult<Option<UserSettings>> {
-        let row = sqlx::query("SELECT * FROM user_settings WHERE user_id = ?")
-            .bind(user_id.0.to_string())
+        let row = sqlx::query("SELECT * FROM user_settings WHERE user_id = $1")
+            .bind(user_id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_storage_err)?;
 
-        Ok(row
-            .map(|row| -> Result<UserSettings> {
-                let provider_str: String = row.try_get("provider")?;
-                let provider = if provider_str == "LOCAL" {
-                    LlmProvider::Local
-                } else if provider_str == "OPEN_AI_COMPATIBLE" {
-                    LlmProvider::OpenAiCompatible
-                } else if let Some(rest) = provider_str.strip_prefix("OTHER:") {
-                    LlmProvider::Other(rest.to_string())
-                } else {
-                    LlmProvider::Local
-                };
+        row.map(|row| -> Result<UserSettings> {
+            let provider_str: String = row.try_get("provider")?;
+            let automation_value: serde_json::Value = row.try_get("automation")?;
+            let weekly_value: serde_json::Value = row.try_get("weekly_review")?;
 
-                let automation: AutomationSettings =
-                    serde_json::from_str(row.try_get::<String, _>("automation")?.as_str())?;
-                let weekly_review: WeeklyReviewSettings =
-                    serde_json::from_str(row.try_get::<String, _>("weekly_review")?.as_str())?;
-
-                Ok(UserSettings {
-                    user_id,
-                    provider,
-                    model_for_planning: row.try_get("model_for_planning")?,
-                    model_for_routine: row.try_get("model_for_routine")?,
-                    automation,
-                    weekly_review,
-                })
+            Ok(UserSettings {
+                user_id,
+                provider: llm_provider_from_string(&provider_str),
+                model_for_planning: row.try_get("model_for_planning")?,
+                model_for_routine: row.try_get("model_for_routine")?,
+                automation: serde_json::from_value(automation_value)?,
+                weekly_review: serde_json::from_value(weekly_value)?,
             })
-            .transpose()
-            .map_err(map_storage_err)?)
+        })
+        .transpose()
+        .map_err(map_storage_err)
     }
 }

@@ -11,32 +11,33 @@ fn today() -> Date {
     utc_now().date()
 }
 
-async fn default_status(vault: &Vault) -> Status {
-    let group = StatusGroup {
-        id: StatusGroupId::new(),
-        name: "Not started".into(),
-        kind: StatusGroupKind::NotStarted,
+async fn test_vault() -> anyhow::Result<Option<Vault>> {
+    let Ok(database_url) = std::env::var("MNEMA_TEST_DATABASE_URL") else {
+        eprintln!("skipping PostgreSQL integration test: MNEMA_TEST_DATABASE_URL is not set");
+        return Ok(None);
     };
-    let group_id = group.id.clone();
-    let status = Status {
-        id: StatusId::new(),
-        project_id: None,
-        name: "Todo".into(),
-        group_id,
-        order: 0,
-    };
-    let repo = vault.status_repo();
-    repo.insert_group(group).await.unwrap();
-    repo.insert_status(status.clone()).await.unwrap();
-    status
+    let dir = tempdir()?;
+    Vault::connect_or_init_with_database_url(dir.path(), &database_url)
+        .await
+        .map(Some)
+}
+
+async fn default_status(vault: &Vault) -> anyhow::Result<Status> {
+    vault.initialize_defaults().await?;
+    let statuses = vault.status_repo().list_statuses_for_project(None).await?;
+    statuses
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("default status was not created"))
 }
 
 #[tokio::test]
 async fn task_crud_roundtrip() -> anyhow::Result<()> {
-    let dir = tempdir()?;
-    let vault = Vault::connect_or_init(dir.path()).await?;
+    let Some(vault) = test_vault().await? else {
+        return Ok(());
+    };
 
-    let status = default_status(&vault).await;
+    let status = default_status(&vault).await?;
 
     let project = Project {
         id: ProjectId::new(),
@@ -100,8 +101,9 @@ async fn task_crud_roundtrip() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn initialize_defaults_creates_statuses_and_lists() -> anyhow::Result<()> {
-    let dir = tempdir()?;
-    let vault = Vault::connect_or_init(dir.path()).await?;
+    let Some(vault) = test_vault().await? else {
+        return Ok(());
+    };
     vault.initialize_defaults().await?;
 
     let status_repo = vault.status_repo();
@@ -118,8 +120,9 @@ async fn initialize_defaults_creates_statuses_and_lists() -> anyhow::Result<()> 
 
 #[tokio::test]
 async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
-    let dir = tempdir()?;
-    let vault = Vault::connect_or_init(dir.path()).await?;
+    let Some(vault) = test_vault().await? else {
+        return Ok(());
+    };
     let repo = vault.user_settings_repo();
 
     let mut settings = UserSettings::default();

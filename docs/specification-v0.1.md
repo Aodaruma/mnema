@@ -38,16 +38,18 @@
 ### 2.2 Vault 構造（案）
 
 - `vault_root/`
-  - `tasks.sqlite`（ローカル RDB）
   - `config.json`（UserSettings など）
   - `assistant/`（アバター画像・秘書設定）
   - `memory/`（LLM メモリ関連の永続化）
   - `attachments/`（添付ファイル）
   - `exports/`（JSON / Markdown などのエクスポート）
 
+構造化データの正本は PostgreSQL に置く。接続先は `MNEMA_DATABASE_URL` で指定し、
+Vault は添付・エクスポート・秘書アセット・ローカル設定などのファイル置き場として維持する。
+
 ### 2.3 ロックインしない方針
 
-- DB を使いつつも、定期的に JSON / Markdown にエクスポート
+- PostgreSQL を使いつつも、定期的に JSON / Markdown にエクスポート
 - 最悪アプリが動かなくても、エクスポートからタスク・プロジェクトを復元できる構造を目指す
 
 ------
@@ -328,7 +330,7 @@
 - domain 層
   - Task / Project / List / Milestone / Assistant などのビジネスロジック
 - infrastructure 層
-  - DB（SQLite 予定）、ファイルストレージ、同期クライアント、LLM クライアント
+  - DB（PostgreSQL）、ファイルストレージ、同期クライアント、LLM クライアント
 - application / service 層
   - ユースケース単位のサービス
     - Inbox への追加
@@ -355,13 +357,14 @@
 
 ### 5.2 データ永続化
 
-- v1: SQLite + `sqlx` or `SeaORM`
+- v1: PostgreSQL + `sqlx`
   - 理由
-    - ローカルファーストアプリと相性が良い
-    - Rust エコシステムが成熟
+    - 将来の同期・サーバー化・履歴系データ拡張に寄せやすい
+    - JSONB / timestamp / UUID などを素直に扱える
+    - Rust エコシステムが成熟している
 - 拡張の余地
   - 分析用途で DuckDB をサブ DB として利用
-  - サーバーサイド（クラウド同期サービス）では PostgreSQL / libSQL 系を検討
+  - ローカル単体運用向けに将来 SQLite backend を復活させる可能性は残す
 
 ### 5.3 ID 設計
 

@@ -41,9 +41,9 @@ Conceptually, Mnema sits somewhere between:
 
 * Vaults live on your machine (in a directory like `./mnema-vault/`).
 * Sync is **optional**, not required (similar to Obsidian Sync vs. local vault).
-* The local database (e.g. SQLite) is the source of truth for tasks and structure,
-  and project descriptions / user preferences are also stored as Markdown in the
-  same vault so your data stays portable and readable.
+* PostgreSQL is the source of truth for tasks and structure, while the vault
+  directory still stores project notes, user preferences, assets, and exports so
+  file-based data stays portable and readable.
 
 ### AI as a secretary, not a boss
 
@@ -104,7 +104,8 @@ Mnema tries to **reduce** friction, not add more:
 
 * **Language**: Rust (core logic and backend)
 * **Desktop Shell**: TBD (Tauri is the current favorite; still evaluating)
-* **Storage**: Local RDBMS (likely SQLite) inside a “vault” folder
+* **Storage**: PostgreSQL via `MNEMA_DATABASE_URL`, plus a local vault folder for
+  files, assets, exports, and app-local configuration
 * **LLM layer**:
 
   * pluggable providers (local via Ollama, cloud via OpenAI-compatible APIs)
@@ -117,6 +118,21 @@ Mnema tries to **reduce** friction, not add more:
     * due date / schedule suggestion
     * weekly review preparation
     * proactive notifications and suggestions (e.g. end-of-day or AFK windows)
+
+---
+
+## Database
+
+Mnema expects a PostgreSQL connection string in `MNEMA_DATABASE_URL`.
+
+If unset, development builds try:
+
+```text
+postgres://postgres:postgres@localhost/mnema
+```
+
+Integration tests use `MNEMA_TEST_DATABASE_URL` when it is set; otherwise the
+database-backed tests exit without touching a database.
 
 ---
 
