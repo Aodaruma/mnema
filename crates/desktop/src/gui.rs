@@ -69,6 +69,7 @@ const INPUT_HEIGHT: f32 = 34.0;
 const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
+const LOGO_FONT_FAMILY: &str = "mnema_logo";
 
 struct NativeMenu {
     root: Menu,
@@ -792,7 +793,7 @@ impl eframe::App for MnemaGuiApp {
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(bold_text("Mnema").color(palette.brand));
+                ui.heading(logo_text("Mnema").color(palette.brand));
                 ui.add_space(12.0);
                 ui.label(format!("Vault: {}", self.normalized_vault_path().display()));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -1157,25 +1158,38 @@ impl Palette {
 }
 
 fn configure_fonts(ctx: &egui::Context) {
-    let Some(font_bytes) = load_noto_sans_jp() else {
-        return;
-    };
-
     let mut fonts = FontDefinitions::default();
-    let font_name = "noto_sans_jp".to_owned();
-    fonts.font_data.insert(
-        font_name.clone(),
-        Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
-            coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_REGULAR)]),
-            ..Default::default()
-        })),
-    );
 
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-        family.insert(0, font_name.clone());
+    if let Some(font_bytes) = load_noto_sans_jp() {
+        let font_name = "noto_sans_jp".to_owned();
+        fonts.font_data.insert(
+            font_name.clone(),
+            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
+                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_REGULAR)]),
+                ..Default::default()
+            })),
+        );
+
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.insert(0, font_name.clone());
+        }
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+            family.push(font_name);
+        }
     }
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-        family.push(font_name);
+
+    if let Some(font_bytes) = load_montserrat() {
+        let font_name = "montserrat".to_owned();
+        fonts.font_data.insert(
+            font_name.clone(),
+            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
+                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_BOLD)]),
+                ..Default::default()
+            })),
+        );
+        fonts
+            .families
+            .insert(FontFamily::Name(LOGO_FONT_FAMILY.into()), vec![font_name]);
     }
 
     ctx.set_fonts(fonts);
@@ -1191,6 +1205,13 @@ fn load_noto_sans_jp() -> Option<Vec<u8>> {
     ]
     .into_iter()
     .find_map(|path| fs::read(path).ok())
+}
+
+fn load_montserrat() -> Option<Vec<u8>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    [manifest_dir.join("assets/fonts/Montserrat-VF.ttf")]
+        .into_iter()
+        .find_map(|path| fs::read(path).ok())
 }
 
 fn configure_style(ctx: &egui::Context, dark_factor: f32, dark_mode: bool) {
@@ -1263,6 +1284,13 @@ fn regular_text(text: impl Into<String>) -> RichText {
 
 fn bold_text(text: impl Into<String>) -> RichText {
     regular_text(text)
+        .variation("wght", FONT_WEIGHT_BOLD)
+        .strong()
+}
+
+fn logo_text(text: impl Into<String>) -> RichText {
+    RichText::new(text)
+        .family(FontFamily::Name(LOGO_FONT_FAMILY.into()))
         .variation("wght", FONT_WEIGHT_BOLD)
         .strong()
 }
