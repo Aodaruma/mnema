@@ -43,6 +43,7 @@ enum View {
     Today,
     Inbox,
     Schedule,
+    Assistant,
     Settings,
 }
 
@@ -65,6 +66,12 @@ enum MenuAction {
     Close,
     SetView(View),
     SetDarkMode(bool),
+}
+
+#[derive(Debug, Clone)]
+struct AssistantChatMessage {
+    role: &'static str,
+    content: String,
 }
 
 const INPUT_HEIGHT: f32 = 34.0;
@@ -149,6 +156,7 @@ struct NativeMenu {
     today: MenuItem,
     inbox: MenuItem,
     schedule: MenuItem,
+    assistant: MenuItem,
     settings: MenuItem,
     light_mode: CheckMenuItem,
     dark_mode: CheckMenuItem,
@@ -197,6 +205,7 @@ impl NativeMenu {
         let today = MenuItem::with_id("mnema.view.today", "&Today", true, None);
         let inbox = MenuItem::with_id("mnema.view.inbox", "&Inbox", true, None);
         let schedule = MenuItem::with_id("mnema.view.schedule", "&Schedule", true, None);
+        let assistant = MenuItem::with_id("mnema.view.assistant", "&Assistant", true, None);
         let settings = MenuItem::with_id("mnema.view.settings", "Se&ttings", true, None);
         let light_mode =
             CheckMenuItem::with_id("mnema.theme.light", "&Light mode", true, !dark_mode, None);
@@ -210,6 +219,7 @@ impl NativeMenu {
                 &today,
                 &inbox,
                 &schedule,
+                &assistant,
                 &settings,
                 &view_separator,
                 &light_mode,
@@ -228,6 +238,7 @@ impl NativeMenu {
             today,
             inbox,
             schedule,
+            assistant,
             settings,
             light_mode,
             dark_mode: dark_mode_item,
@@ -285,6 +296,8 @@ impl NativeMenu {
             Some(MenuAction::SetView(View::Inbox))
         } else if id == self.schedule.id().as_ref() {
             Some(MenuAction::SetView(View::Schedule))
+        } else if id == self.assistant.id().as_ref() {
+            Some(MenuAction::SetView(View::Assistant))
         } else if id == self.settings.id().as_ref() {
             Some(MenuAction::SetView(View::Settings))
         } else if id == self.light_mode.id().as_ref() {
@@ -357,6 +370,8 @@ struct MnemaGuiApp {
     view: View,
     task_title: String,
     quick_capture: String,
+    assistant_input: String,
+    assistant_messages: Vec<AssistantChatMessage>,
     due_date: String,
     minutes: String,
     editing_task_id: Option<TaskId>,
@@ -413,6 +428,13 @@ impl MnemaGuiApp {
             view: View::Today,
             task_title: String::new(),
             quick_capture: String::new(),
+            assistant_input: String::new(),
+            assistant_messages: vec![AssistantChatMessage {
+                role: "Assistant",
+                content:
+                    "タスク作成や今日の次アクションを相談できます。例: Write proposal tomorrow 45m"
+                        .into(),
+            }],
             due_date: today.clone(),
             minutes: String::from("45"),
             editing_task_id: None,
@@ -637,6 +659,68 @@ impl MnemaGuiApp {
         self.edit_minutes.clear();
     }
 
+    fn send_assistant_message(&mut self) {
+        let input = self.assistant_input.trim().to_string();
+        if input.is_empty() {
+            return;
+        }
+
+        self.assistant_messages.push(AssistantChatMessage {
+            role: "You",
+            content: input.clone(),
+        });
+        self.assistant_input.clear();
+
+        if asks_next_action(&input) {
+            let response = self.next_action_response();
+            self.assistant_messages.push(AssistantChatMessage {
+                role: "Assistant",
+                content: response,
+            });
+            return;
+        }
+
+        match parse_quick_capture(&input, OffsetDateTime::now_utc().date()) {
+            Ok(request) => {
+                let title = request.title.clone();
+                self.capture_task(request);
+                if self.error.is_none() {
+                    self.assistant_messages.push(AssistantChatMessage {
+                        role: "Assistant",
+                        content: format!("タスクを作成しました: {title}"),
+                    });
+                }
+            }
+            Err(_) => self.assistant_messages.push(AssistantChatMessage {
+                role: "Assistant",
+                content: "今はタスク作成と次アクション相談に対応しています。例: Write proposal tomorrow 45m".into(),
+            }),
+        }
+    }
+
+    fn next_action_response(&self) -> String {
+        let Some(task) = self.tasks.first() else {
+            return "今のところ未完了タスクはありません。Inbox に気になることを追加しておくと計画できます。".into();
+        };
+
+        let mut details = Vec::new();
+        if let Some(due_date) = task.due_date {
+            details.push(format!("due {due_date}"));
+        }
+        if let Some(minutes) = task.estimated_minutes {
+            details.push(format!("{minutes}m"));
+        }
+        let suffix = if details.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", details.join(", "))
+        };
+        format!(
+            "次は「{}{}」から進めるのがよさそうです。",
+            task.title, suffix
+        )
+    }
+
     fn refresh_schedule(&mut self) {
         let Ok(vault) = self.vault_clone() else {
             return;
@@ -840,7 +924,23 @@ impl MnemaGuiApp {
                 list_repo.as_ref(),
                 status_repo.as_ref(),
             );
-            Result::<Task>::Ok(service.capture_inbox_task(request).await?.task)
+            let task = service.capture_inbox_task(request).await?.task;
+            let automation_log_repo = vault.automation_log_repo();
+            automation_log_repo
+                .insert(AutomationLog {
+                    id: AutomationLogId::new(),
+                    task_id: Some(task.id.clone()),
+                    project_id: task.project_id.clone(),
+                    list_id: task.list_id.clone(),
+                    assistant_id: AssistantId::new(),
+                    action_type: AutomationActionType::CreateTask,
+                    before_state: None,
+                    after_state: Some(serde_json::to_value(&task)?),
+                    created_at: OffsetDateTime::now_utc(),
+                    explanation: Some("Created from desktop capture".into()),
+                })
+                .await?;
+            Result::<Task>::Ok(task)
         });
 
         match result {
@@ -1092,6 +1192,7 @@ impl eframe::App for MnemaGuiApp {
                 nav_button(ui, &mut self.view, View::Today, "Today");
                 nav_button(ui, &mut self.view, View::Inbox, "Inbox");
                 nav_button(ui, &mut self.view, View::Schedule, "Schedule");
+                nav_button(ui, &mut self.view, View::Assistant, "Assistant");
                 ui.separator();
                 nav_button(ui, &mut self.view, View::Settings, "Settings");
             });
@@ -1110,6 +1211,7 @@ impl eframe::App for MnemaGuiApp {
             View::Today => self.show_today(ui, palette),
             View::Inbox => self.show_inbox(ui, palette),
             View::Schedule => self.show_schedule(ui, palette),
+            View::Assistant => self.show_assistant(ui, palette),
             View::Settings => self.show_settings(ui, palette),
         });
     }
@@ -1211,6 +1313,29 @@ impl MnemaGuiApp {
             self.handle_task_action(action);
         }
         self.show_task_editor(ui, palette);
+    }
+
+    fn show_assistant(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Assistant", palette);
+        ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+            for message in &self.assistant_messages {
+                ui.group(|ui| {
+                    ui.label(bold_text(message.role).color(palette.section));
+                    ui.label(message.content.as_str());
+                });
+                ui.add_space(8.0);
+            }
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [560.0, INPUT_HEIGHT],
+                text_field(&mut self.assistant_input, "Ask or capture a task"),
+            );
+            if ui.button("Send").clicked() {
+                self.send_assistant_message();
+            }
+        });
     }
 
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -2295,6 +2420,15 @@ fn parse_duration_token(token: &str) -> Option<u32> {
         .or_else(|| token.strip_suffix('h'))
         .and_then(|value| value.parse::<f32>().ok())
         .map(|hours| (hours * 60.0).round().max(1.0) as u32)
+}
+
+fn asks_next_action(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("what should i do next")
+        || value.contains("next action")
+        || value.contains("次")
+        || value.contains("なにする")
+        || value.contains("何する")
 }
 
 fn default_workday_availability(date: Date) -> Result<Vec<mnema_app::AvailabilityWindow>> {

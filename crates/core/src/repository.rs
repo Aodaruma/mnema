@@ -1,3 +1,4 @@
+use crate::automation_log::AutomationLog;
 use crate::list::List;
 use crate::milestone::Milestone;
 use crate::project::Project;
@@ -5,7 +6,7 @@ use crate::schedule_block::ScheduleBlock;
 use crate::status::{Status, StatusGroup};
 use crate::task::Task;
 use crate::{
-    ids::{ListId, MilestoneId, ProjectId, ScheduleBlockId, TaskId},
+    ids::{AutomationLogId, ListId, MilestoneId, ProjectId, ScheduleBlockId, TaskId},
     user_settings::UserSettings,
 };
 use thiserror::Error;
@@ -85,4 +86,11 @@ pub trait ScheduleBlockRepository: Send + Sync {
 pub trait UserSettingsRepository: Send + Sync {
     async fn upsert(&self, settings: UserSettings) -> CoreResult<()>;
     async fn get(&self, user_id: crate::ids::UserId) -> CoreResult<Option<UserSettings>>;
+}
+
+#[async_trait::async_trait]
+pub trait AutomationLogRepository: Send + Sync {
+    async fn insert(&self, log: AutomationLog) -> CoreResult<()>;
+    async fn find(&self, id: AutomationLogId) -> CoreResult<Option<AutomationLog>>;
+    async fn list_recent(&self, limit: u32) -> CoreResult<Vec<AutomationLog>>;
 }

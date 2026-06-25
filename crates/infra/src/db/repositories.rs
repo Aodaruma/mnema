@@ -108,6 +108,31 @@ fn llm_provider_from_string(provider: &str) -> LlmProvider {
     }
 }
 
+fn automation_action_type_to_string(action_type: &AutomationActionType) -> String {
+    match action_type {
+        AutomationActionType::Move => "MOVE".to_string(),
+        AutomationActionType::UpdateDue => "UPDATE_DUE".to_string(),
+        AutomationActionType::Classify => "CLASSIFY".to_string(),
+        AutomationActionType::CreateTask => "CREATE_TASK".to_string(),
+        AutomationActionType::UpdateStatus => "UPDATE_STATUS".to_string(),
+        AutomationActionType::Other(value) => format!("OTHER:{value}"),
+    }
+}
+
+fn automation_action_type_from_string(action_type: &str) -> AutomationActionType {
+    match action_type {
+        "MOVE" => AutomationActionType::Move,
+        "UPDATE_DUE" => AutomationActionType::UpdateDue,
+        "CLASSIFY" => AutomationActionType::Classify,
+        "CREATE_TASK" => AutomationActionType::CreateTask,
+        "UPDATE_STATUS" => AutomationActionType::UpdateStatus,
+        value if value.starts_with("OTHER:") => {
+            AutomationActionType::Other(value.trim_start_matches("OTHER:").to_string())
+        }
+        value => AutomationActionType::Other(value.to_string()),
+    }
+}
+
 fn schedule_block_type_to_str(block_type: &ScheduleBlockType) -> &'static str {
     match block_type {
         ScheduleBlockType::Task => "TASK",
@@ -1099,6 +1124,92 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
 }
 
 #[derive(Clone)]
+pub struct PostgresAutomationLogRepository {
+    pool: PgPool,
+}
+
+impl PostgresAutomationLogRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl AutomationLogRepository for PostgresAutomationLogRepository {
+    async fn insert(&self, log: AutomationLog) -> CoreResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO automation_logs (
+                id, task_id, project_id, list_id, assistant_id, action_type,
+                before_state, after_state, created_at, explanation
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+        )
+        .bind(log.id.0)
+        .bind(log.task_id.map(|id| id.0))
+        .bind(log.project_id.map(|id| id.0))
+        .bind(log.list_id.map(|id| id.0))
+        .bind(log.assistant_id.0)
+        .bind(automation_action_type_to_string(&log.action_type))
+        .bind(log.before_state)
+        .bind(log.after_state)
+        .bind(log.created_at)
+        .bind(log.explanation)
+        .execute(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    async fn find(&self, id: AutomationLogId) -> CoreResult<Option<AutomationLog>> {
+        let row = sqlx::query("SELECT * FROM automation_logs WHERE id = $1")
+            .bind(id.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_storage_err)?;
+
+        row.map(row_to_automation_log)
+            .transpose()
+            .map_err(map_storage_err)
+    }
+
+    async fn list_recent(&self, limit: u32) -> CoreResult<Vec<AutomationLog>> {
+        let rows = sqlx::query("SELECT * FROM automation_logs ORDER BY created_at DESC LIMIT $1")
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_automation_log)
+            .collect::<Result<Vec<_>>>()
+            .map_err(map_storage_err)
+    }
+}
+
+fn row_to_automation_log(row: sqlx::postgres::PgRow) -> Result<AutomationLog> {
+    let action_type: String = row.try_get("action_type")?;
+    Ok(AutomationLog {
+        id: AutomationLogId::from(row.try_get::<uuid::Uuid, _>("id")?),
+        task_id: row
+            .try_get::<Option<uuid::Uuid>, _>("task_id")?
+            .map(TaskId::from),
+        project_id: row
+            .try_get::<Option<uuid::Uuid>, _>("project_id")?
+            .map(ProjectId::from),
+        list_id: row
+            .try_get::<Option<uuid::Uuid>, _>("list_id")?
+            .map(ListId::from),
+        assistant_id: AssistantId::from(row.try_get::<uuid::Uuid, _>("assistant_id")?),
+        action_type: automation_action_type_from_string(&action_type),
+        before_state: row.try_get("before_state")?,
+        after_state: row.try_get("after_state")?,
+        created_at: row.try_get("created_at")?,
+        explanation: row.try_get("explanation")?,
+    })
+}
+
+#[derive(Clone)]
 pub struct SqliteTaskRepository {
     pool: SqlitePool,
 }
@@ -2061,4 +2172,117 @@ impl UserSettingsRepository for SqliteUserSettingsRepository {
         .transpose()
         .map_err(map_storage_err)
     }
+}
+
+#[derive(Clone)]
+pub struct SqliteAutomationLogRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteAutomationLogRepository {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl AutomationLogRepository for SqliteAutomationLogRepository {
+    async fn insert(&self, log: AutomationLog) -> CoreResult<()> {
+        let before_state = log
+            .before_state
+            .map(|value| serde_json::to_string(&value))
+            .transpose()
+            .map_err(map_storage_err)?;
+        let after_state = log
+            .after_state
+            .map(|value| serde_json::to_string(&value))
+            .transpose()
+            .map_err(map_storage_err)?;
+        sqlx::query(
+            r#"
+            INSERT INTO automation_logs (
+                id, task_id, project_id, list_id, assistant_id, action_type,
+                before_state, after_state, created_at, explanation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+        )
+        .bind(log.id.0.to_string())
+        .bind(log.task_id.map(|id| id.0.to_string()))
+        .bind(log.project_id.map(|id| id.0.to_string()))
+        .bind(log.list_id.map(|id| id.0.to_string()))
+        .bind(log.assistant_id.0.to_string())
+        .bind(automation_action_type_to_string(&log.action_type))
+        .bind(before_state)
+        .bind(after_state)
+        .bind(to_rfc3339(log.created_at).map_err(map_storage_err)?)
+        .bind(log.explanation)
+        .execute(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    async fn find(&self, id: AutomationLogId) -> CoreResult<Option<AutomationLog>> {
+        let row = sqlx::query("SELECT * FROM automation_logs WHERE id = ?")
+            .bind(id.0.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_storage_err)?;
+
+        row.map(row_to_automation_log_sqlite)
+            .transpose()
+            .map_err(map_storage_err)
+    }
+
+    async fn list_recent(&self, limit: u32) -> CoreResult<Vec<AutomationLog>> {
+        let rows = sqlx::query("SELECT * FROM automation_logs ORDER BY created_at DESC LIMIT ?")
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_automation_log_sqlite)
+            .collect::<Result<Vec<_>>>()
+            .map_err(map_storage_err)
+    }
+}
+
+fn row_to_automation_log_sqlite(row: sqlx::sqlite::SqliteRow) -> Result<AutomationLog> {
+    let action_type: String = row.try_get("action_type")?;
+    let before_state = row
+        .try_get::<Option<String>, _>("before_state")?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    let after_state = row
+        .try_get::<Option<String>, _>("after_state")?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+
+    Ok(AutomationLog {
+        id: AutomationLogId::from(uuid::Uuid::parse_str(&row.try_get::<String, _>("id")?)?),
+        task_id: row
+            .try_get::<Option<String>, _>("task_id")?
+            .map(|value| uuid::Uuid::parse_str(&value))
+            .transpose()?
+            .map(TaskId::from),
+        project_id: row
+            .try_get::<Option<String>, _>("project_id")?
+            .map(|value| uuid::Uuid::parse_str(&value))
+            .transpose()?
+            .map(ProjectId::from),
+        list_id: row
+            .try_get::<Option<String>, _>("list_id")?
+            .map(|value| uuid::Uuid::parse_str(&value))
+            .transpose()?
+            .map(ListId::from),
+        assistant_id: AssistantId::from(uuid::Uuid::parse_str(
+            &row.try_get::<String, _>("assistant_id")?,
+        )?),
+        action_type: automation_action_type_from_string(&action_type),
+        before_state,
+        after_state,
+        created_at: from_rfc3339(&row.try_get::<String, _>("created_at")?)?,
+        explanation: row.try_get("explanation")?,
+    })
 }

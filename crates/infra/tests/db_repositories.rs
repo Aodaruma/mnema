@@ -1,5 +1,6 @@
 use mnema_core::prelude::*;
 use mnema_infra::db::Vault;
+use serde_json::json;
 use tempfile::tempdir;
 use time::{Date, OffsetDateTime};
 
@@ -177,6 +178,34 @@ async fn schedule_block_replace_and_list_for_day() -> anyhow::Result<()> {
     let blocks = repo.list_for_day(target_date).await?;
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].state, ScheduleBlockState::Scheduled);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn automation_log_roundtrip() -> anyhow::Result<()> {
+    let vault = test_vault().await?;
+    let repo = vault.automation_log_repo();
+    let log = AutomationLog {
+        id: AutomationLogId::new(),
+        task_id: None,
+        project_id: None,
+        list_id: None,
+        assistant_id: AssistantId::new(),
+        action_type: AutomationActionType::CreateTask,
+        before_state: None,
+        after_state: Some(json!({"title": "Captured task"})),
+        created_at: utc_now(),
+        explanation: Some("Quick capture".into()),
+    };
+    let log_id = log.id.clone();
+
+    repo.insert(log.clone()).await?;
+    let stored = repo.find(log_id).await?.expect("stored log");
+
+    assert_eq!(stored.action_type, AutomationActionType::CreateTask);
+    assert_eq!(stored.after_state, log.after_state);
+    assert_eq!(repo.list_recent(10).await?.len(), 1);
 
     Ok(())
 }

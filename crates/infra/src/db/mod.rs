@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use mnema_core::prelude::{
-    ListRepository, MilestoneRepository, ProjectRepository, ScheduleBlockRepository,
-    StatusRepository, TaskRepository, UserSettingsRepository,
+    AutomationLogRepository, ListRepository, MilestoneRepository, ProjectRepository,
+    ScheduleBlockRepository, StatusRepository, TaskRepository, UserSettingsRepository,
 };
 use sqlx::{
     PgPool, Postgres, SqlitePool, migrate::MigrateDatabase, postgres::PgPoolOptions,
@@ -17,11 +17,12 @@ mod defaults;
 mod repositories;
 
 pub use repositories::{
-    PostgresListRepository, PostgresMilestoneRepository, PostgresProjectRepository,
-    PostgresScheduleBlockRepository, PostgresStatusRepository, PostgresTaskRepository,
-    PostgresUserSettingsRepository, SqliteListRepository, SqliteMilestoneRepository,
-    SqliteProjectRepository, SqliteScheduleBlockRepository, SqliteStatusRepository,
-    SqliteTaskRepository, SqliteUserSettingsRepository,
+    PostgresAutomationLogRepository, PostgresListRepository, PostgresMilestoneRepository,
+    PostgresProjectRepository, PostgresScheduleBlockRepository, PostgresStatusRepository,
+    PostgresTaskRepository, PostgresUserSettingsRepository, SqliteAutomationLogRepository,
+    SqliteListRepository, SqliteMilestoneRepository, SqliteProjectRepository,
+    SqliteScheduleBlockRepository, SqliteStatusRepository, SqliteTaskRepository,
+    SqliteUserSettingsRepository,
 };
 
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost/mnema";
@@ -203,6 +204,17 @@ impl Vault {
             }
         }
     }
+
+    pub fn automation_log_repo(&self) -> AutomationLogRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteAutomationLogRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresAutomationLogRepository::new(pool.clone()))
+            }
+        }
+    }
 }
 
 fn default_sqlite_path() -> PathBuf {
@@ -229,3 +241,4 @@ pub type MilestoneRepo = Arc<dyn MilestoneRepository>;
 pub type StatusRepo = Arc<dyn StatusRepository>;
 pub type ScheduleBlockRepo = Arc<dyn ScheduleBlockRepository>;
 pub type UserSettingsRepo = Arc<dyn UserSettingsRepository>;
+pub type AutomationLogRepo = Arc<dyn AutomationLogRepository>;
