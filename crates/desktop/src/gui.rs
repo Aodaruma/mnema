@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontDefinitions, FontFamily, RichText, ScrollArea, Stroke,
-    TextEdit,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontTweak, RichText, ScrollArea,
+    Stroke, TextEdit,
 };
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
@@ -56,6 +56,8 @@ enum ScheduleAction {
 
 const INPUT_HEIGHT: f32 = 34.0;
 const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
+const FONT_WEIGHT_REGULAR: f32 = 400.0;
+const FONT_WEIGHT_BOLD: f32 = 700.0;
 
 struct MnemaGuiApp {
     runtime: Runtime,
@@ -83,7 +85,7 @@ impl MnemaGuiApp {
     fn new(cc: &eframe::CreationContext<'_>, initial_vault_path: PathBuf) -> Self {
         configure_fonts(&cc.egui_ctx);
         let dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
-        configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 });
+        configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 }, dark_mode);
 
         let today = OffsetDateTime::now_utc().date().to_string();
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
@@ -515,7 +517,7 @@ impl eframe::App for MnemaGuiApp {
             self.dark_mode,
             0.28,
         );
-        configure_style(ui.ctx(), dark_factor);
+        configure_style(ui.ctx(), dark_factor, self.dark_mode);
         if (0.0..1.0).contains(&dark_factor) {
             ui.ctx().request_repaint();
         }
@@ -524,7 +526,7 @@ impl eframe::App for MnemaGuiApp {
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("Mnema").color(palette.brand));
+                ui.heading(bold_text("Mnema").color(palette.brand));
                 ui.add_space(12.0);
                 ui.label(format!("Vault: {}", self.normalized_vault_path().display()));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -611,7 +613,7 @@ impl MnemaGuiApp {
         }
 
         ui.separator();
-        ui.label(RichText::new("Tasks").strong());
+        ui.label(bold_text("Tasks"));
         if let Some(action) = task_list(ui, &self.tasks, palette) {
             self.handle_task_action(action);
         }
@@ -709,7 +711,7 @@ impl MnemaGuiApp {
 
         ui.add_space(8.0);
         ui.separator();
-        ui.label(RichText::new("Edit task").strong().color(palette.section));
+        ui.label(bold_text("Edit task").color(palette.section));
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
@@ -896,7 +898,10 @@ fn configure_fonts(ctx: &egui::Context) {
     let font_name = "noto_sans_jp".to_owned();
     fonts.font_data.insert(
         font_name.clone(),
-        Arc::new(FontData::from_owned(font_bytes)),
+        Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
+            coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_REGULAR)]),
+            ..Default::default()
+        })),
     );
 
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
@@ -921,12 +926,12 @@ fn load_noto_sans_jp() -> Option<Vec<u8>> {
     .find_map(|path| fs::read(path).ok())
 }
 
-fn configure_style(ctx: &egui::Context, dark_factor: f32) {
+fn configure_style(ctx: &egui::Context, dark_factor: f32, dark_mode: bool) {
     let palette = Palette::at(dark_factor);
-    let mut style = egui::Theme::from_dark_mode(dark_factor >= 0.5).default_style();
+    let mut style = egui::Theme::from_dark_mode(dark_mode).default_style();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.visuals = themed_visuals(palette, dark_factor);
+    style.visuals = themed_visuals(palette, dark_mode);
     ctx.set_global_style(style);
 }
 
@@ -958,11 +963,9 @@ fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
             ui.add_space(3.0);
             if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
                 *dark_mode = false;
-                ui.ctx().set_theme(egui::Theme::Light);
             }
             if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
                 *dark_mode = true;
-                ui.ctx().set_theme(egui::Theme::Dark);
             }
         },
     );
@@ -987,15 +990,25 @@ fn theme_icon_button(
     ui.add_sized([31.0, 28.0], button).on_hover_text(hover_text)
 }
 
+fn regular_text(text: impl Into<String>) -> RichText {
+    RichText::new(text).variation("wght", FONT_WEIGHT_REGULAR)
+}
+
+fn bold_text(text: impl Into<String>) -> RichText {
+    regular_text(text)
+        .variation("wght", FONT_WEIGHT_BOLD)
+        .strong()
+}
+
 fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a> {
     TextEdit::singleline(value)
         .hint_text(hint_text)
         .vertical_align(Align::Center)
 }
 
-fn themed_visuals(palette: Palette, dark_factor: f32) -> egui::Visuals {
-    let mut visuals = egui::Theme::from_dark_mode(dark_factor >= 0.5).default_visuals();
-    visuals.dark_mode = dark_factor >= 0.5;
+fn themed_visuals(palette: Palette, dark_mode: bool) -> egui::Visuals {
+    let mut visuals = egui::Theme::from_dark_mode(dark_mode).default_visuals();
+    visuals.dark_mode = dark_mode;
     visuals.override_text_color = Some(palette.text);
     visuals.weak_text_color = Some(palette.muted);
     visuals.panel_fill = palette.panel;
@@ -1051,7 +1064,7 @@ fn mix_color(light: Color32, dark: Color32, factor: f32) -> Color32 {
 
 fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
     ui.add_space(12.0);
-    ui.heading(RichText::new(title).color(palette.section));
+    ui.heading(bold_text(title).color(palette.section));
     ui.add_space(8.0);
 }
 
@@ -1065,9 +1078,9 @@ fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) -> Option<Task
     ScrollArea::vertical().show(ui, |ui| {
         for task in tasks {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&task.title).strong());
+                ui.label(bold_text(task.title.as_str()));
                 if let Some(due_date) = task.due_date {
-                    ui.label(RichText::new(format!("due {due_date}")).color(palette.due));
+                    ui.label(regular_text(format!("due {due_date}")).color(palette.due));
                 }
                 if let Some(minutes) = task.estimated_minutes {
                     ui.label(format!("{minutes}m"));
@@ -1104,7 +1117,7 @@ fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
                     format_hm(block.window.start),
                     format_hm(block.window.end)
                 ));
-                ui.label(RichText::new(&block.title).strong());
+                ui.label(bold_text(block.title.as_str()));
                 ui.label(format!("{}m", block.required_minutes));
             });
             ui.separator();
@@ -1132,7 +1145,7 @@ fn saved_schedule_list(
                         .as_deref()
                         .unwrap_or("(untitled block)"),
                 );
-                ui.label(RichText::new(schedule_state_label(&block.state)).color(palette.success));
+                ui.label(regular_text(schedule_state_label(&block.state)).color(palette.success));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if block.state != ScheduleBlockState::Cancelled && ui.button("Cancel").clicked()
                     {
