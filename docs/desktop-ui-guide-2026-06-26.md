@@ -53,7 +53,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 実装メモ:
 
-- Navigation / theme / edit / delete / repair のアイコンには Google Material Icons を同梱して使う。
+- Navigation / theme / delete / repair のアイコンには Google Material Icons を同梱して使う。
 - Material Icons は Apache License 2.0。`crates/desktop/assets/fonts/MaterialIcons-Apache-2.0.txt` にライセンス文を置く。
 
 ## Inbox
@@ -70,7 +70,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 - Quick capture: 短い文章からタスク名、期限、見積時間を解釈して追加する。
 - Task title / Due / Estimate: 明示的に入力してタスクを追加する。
-- 一覧上の status / due / estimate / edit / delete: 既存タスクのステータス変更、期限・見積の行内編集、編集、削除を行う。
+- 一覧上の status / title / due / estimate / delete: 既存タスクのステータス変更、タスク名・期限・見積の行内編集、削除を行う。
 
 この画面に置かないもの:
 
@@ -100,11 +100,12 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 - Tasks: 左パネルのタスク一覧。status button、所属、タスク名、期限、見積を表示する。
 - status button: 二重丸をクリックして status を選ぶ。メニューは status 名だけを表示し、Done 系 status を選ぶと完了扱いになる。
 - status undo / redo: status 変更は `Ctrl+Z` で undo、`Ctrl+Shift+Z` で redo できる。
-- due / estimate: クリックするとその場で背景なしの入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
-- due: 通常入力時は近辺の日付セレクターを表示し、`today`、`tomorrow`、`tue` など英語入力中は候補リストに切り替える。`YYYY-MM-DD`、`YYYYMMDD`、`YYYY/MM/DD` も解釈する。
-- estimate: `30m`、`1h30m`、`01:30`、`01:30:00`、分数を解釈する。固定値と加算ボタンからも更新できる。
+- title: タスク名をダブルクリックするとその場で入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
+- due / estimate: クリックするとその場で背景なしの入力欄に変わる。候補は入力欄の下に floating popup として表示する。
+- due: 通常入力時は近辺の日付セレクターをpopup表示し、`today`、`tomorrow`、`tue` など英語入力中は候補リストに切り替える。`YYYY-MM-DD`、`YYYYMMDD`、`YYYY/MM/DD` も解釈する。
+- estimate: `30m`、`1h30m`、`01:30`、`01:30:00`、分数を解釈する。固定値と加算ボタンをpopup内から選べる。
 - Done toggle: 左パネル下部で完了済みタスクを表示できる。直近10件から表示し、必要に応じて追加読み込みする。
-- edit / delete icon: Material Icons を使う。ホバー時に明るくなり、delete は確認後に実行する。
+- delete icon: Material Icons を使う。ホバー時に明るくなり、確認後に削除する。
 - Agenda date: 右パネル上部で対象日を切り替える。
 - Today: すでに当日が表示されている状態でクリックすると、agenda の現在時刻ラインへスクロールする。
 - Plan: 対象日のタスクから agenda に予定案を作り、proposed ScheduleBlock として保存する。既存 proposed block がある場合は置き換え確認を出す。

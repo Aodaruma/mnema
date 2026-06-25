@@ -11,9 +11,10 @@
 - Projects 画面で Project / List / Milestone を追加・選択できる。
 - Inbox からタスクを追加できる。
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
-- タスク一覧でステータス変更、期限・見積の行内編集、編集、削除ができる。
-- due date は `YYYY-MM-DD` / `YYYYMMDD` / `today` / `tomorrow` / `tue` などを解釈し、Home では日付セレクターまたは候補リストから選べる。
-- estimate は `30m` / `1h30m` / `01:30` / `01:30:00` / 分数を解釈し、Home では固定値・加算ボタンからも選べる。
+- タスク一覧でステータス変更、タスク名・期限・見積の行内編集、削除ができる。
+- タスク名はダブルクリックでその場編集できる。
+- due date は `YYYY-MM-DD` / `YYYYMMDD` / `today` / `tomorrow` / `tue` などを解釈し、Home ではfloating popupの日付セレクターまたは候補リストから選べる。
+- estimate は `30m` / `1h30m` / `01:30` / `01:30:00` / 分数を解釈し、Home ではfloating popupの固定値・加算ボタンからも選べる。
 - タスク一覧のステータス変更は `Ctrl+Z` / `Ctrl+Shift+Z` で undo / redo できる。
 - Home では完了済みタスクをトグルで表示でき、直近10件から追加読み込みできる。
 - Home で plan を生成し、ScheduleBlock として自動保存できる。

@@ -67,7 +67,6 @@ enum ProjectViewMode {
 
 #[derive(Debug, Clone)]
 enum TaskAction {
-    Edit(TaskId),
     SetStatus(TaskId, StatusId),
     SaveInlineField(TaskId, TaskInlineField, String),
     RequestDelete(TaskId),
@@ -78,6 +77,7 @@ enum TaskAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TaskInlineField {
+    Title,
     DueDate,
     EstimateMinutes,
 }
@@ -134,7 +134,6 @@ const ICON_CHECK: char = '\u{e5ca}';
 const ICON_CLOSE: char = '\u{e5cd}';
 const ICON_DARK_MODE: char = '\u{e51c}';
 const ICON_DELETE: char = '\u{e872}';
-const ICON_EDIT: char = '\u{e3c9}';
 const ICON_EVENT: char = '\u{e878}';
 const ICON_FOLDER: char = '\u{e2c7}';
 const ICON_HISTORY: char = '\u{e889}';
@@ -457,10 +456,6 @@ struct MnemaGuiApp {
     assistant_messages: Vec<AssistantChatMessage>,
     due_date: String,
     minutes: String,
-    editing_task_id: Option<TaskId>,
-    edit_title: String,
-    edit_due_date: String,
-    edit_minutes: String,
     inline_task_edit: Option<TaskInlineEdit>,
     editing_schedule_block_id: Option<ScheduleBlockId>,
     schedule_edit_start: String,
@@ -547,10 +542,6 @@ impl MnemaGuiApp {
             }],
             due_date: today.clone(),
             minutes: String::from("45"),
-            editing_task_id: None,
-            edit_title: String::new(),
-            edit_due_date: String::new(),
-            edit_minutes: String::new(),
             inline_task_edit: None,
             editing_schedule_block_id: None,
             schedule_edit_start: String::new(),
@@ -898,9 +889,6 @@ impl MnemaGuiApp {
             Ok(()) => {
                 self.message = String::from("Task deleted");
                 self.error = None;
-                if self.editing_task_id.as_ref() == Some(&deleted_task_id) {
-                    self.clear_task_editor();
-                }
                 if self
                     .inline_task_edit
                     .as_ref()
@@ -917,7 +905,6 @@ impl MnemaGuiApp {
 
     fn handle_task_action(&mut self, action: TaskAction) {
         match action {
-            TaskAction::Edit(task_id) => self.start_edit_task(task_id),
             TaskAction::SetStatus(task_id, status_id) => {
                 self.update_task_status(task_id, status_id)
             }
@@ -934,87 +921,6 @@ impl MnemaGuiApp {
         }
     }
 
-    fn start_edit_task(&mut self, task_id: TaskId) {
-        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
-            self.set_error(anyhow!("task not found"));
-            return;
-        };
-        self.editing_task_id = Some(task.id.clone());
-        self.edit_title = task.title.clone();
-        self.edit_due_date = task
-            .due_date
-            .map(|date| date.to_string())
-            .unwrap_or_default();
-        self.edit_minutes = task
-            .estimated_minutes
-            .map(|minutes| minutes.to_string())
-            .unwrap_or_default();
-        self.inline_task_edit = None;
-        self.error = None;
-    }
-
-    fn save_task_edit(&mut self) {
-        let Some(task_id) = self.editing_task_id.clone() else {
-            return;
-        };
-        let title = self.edit_title.trim().to_string();
-        if title.is_empty() {
-            self.set_error(anyhow!("タスク名を入力してください"));
-            return;
-        }
-        let due_date = match parse_optional_date(&self.edit_due_date) {
-            Ok(date) => date,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let estimated_minutes = match parse_optional_u32(&self.edit_minutes) {
-            Ok(minutes) => minutes,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let Ok(vault) = self.vault_clone() else {
-            return;
-        };
-
-        let result = self.runtime.block_on(async move {
-            let task_repo = vault.task_repo();
-            let status_repo = vault.status_repo();
-            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
-            Result::<Task>::Ok(
-                service
-                    .update_task(UpdateTaskRequest {
-                        task_id,
-                        title,
-                        due_date,
-                        estimated_minutes,
-                    })
-                    .await?,
-            )
-        });
-
-        match result {
-            Ok(task) => {
-                self.message = format!("Updated: {}", task.title);
-                self.error = None;
-                self.clear_task_editor();
-                self.refresh_tasks();
-                self.refresh_schedule();
-            }
-            Err(error) => self.set_error(error),
-        }
-    }
-
-    fn clear_task_editor(&mut self) {
-        self.editing_task_id = None;
-        self.edit_title.clear();
-        self.edit_due_date.clear();
-        self.edit_minutes.clear();
-    }
-
     fn save_inline_task_field(&mut self, task_id: TaskId, field: TaskInlineField, value: String) {
         let Some(task) = self.tasks.iter().find(|task| task.id == task_id).cloned() else {
             self.inline_task_edit = None;
@@ -1022,33 +928,41 @@ impl MnemaGuiApp {
             return;
         };
 
-        let (due_date, estimated_minutes) = match field {
+        let mut title = task.title.clone();
+        let mut due_date = task.due_date;
+        let mut estimated_minutes = task.estimated_minutes;
+
+        match field {
+            TaskInlineField::Title => {
+                title = value.trim().to_string();
+                if title.is_empty() {
+                    self.set_error(anyhow!("タスク名を入力してください"));
+                    return;
+                }
+            }
             TaskInlineField::DueDate => {
-                let due_date = match parse_optional_date(&value) {
+                due_date = match parse_optional_date(&value) {
                     Ok(date) => date,
                     Err(error) => {
                         self.set_error(error);
                         return;
                     }
                 };
-                (due_date, task.estimated_minutes)
             }
             TaskInlineField::EstimateMinutes => {
-                let estimated_minutes = match parse_optional_u32(&value) {
+                estimated_minutes = match parse_optional_u32(&value) {
                     Ok(minutes) => minutes,
                     Err(error) => {
                         self.set_error(error);
                         return;
                     }
                 };
-                (task.due_date, estimated_minutes)
             }
-        };
+        }
 
         let Ok(vault) = self.vault_clone() else {
             return;
         };
-        let title = task.title.clone();
 
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
@@ -2113,7 +2027,6 @@ impl MnemaGuiApp {
                 &mut self.done_task_limit,
                 palette,
             );
-            self.show_task_editor(&mut columns[0], palette);
 
             columns[1].horizontal(|ui| {
                 ui.label(bold_text("Agenda").color(palette.section));
@@ -2231,7 +2144,6 @@ impl MnemaGuiApp {
         ) {
             self.handle_task_action(action);
         }
-        self.show_task_editor(ui, palette);
     }
 
     fn show_assistant(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -2628,40 +2540,6 @@ impl MnemaGuiApp {
         ui.label(format!("Config: {}", config_path().display()));
         if !self.settings_message.is_empty() {
             ui.label(regular_text(self.settings_message.as_str()).color(palette.success));
-        }
-    }
-
-    fn show_task_editor(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        if self.editing_task_id.is_none() {
-            return;
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(bold_text("Edit task").color(palette.section));
-        let mut save = false;
-        let mut cancel = false;
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [340.0, INPUT_HEIGHT],
-                text_field(&mut self.edit_title, "Task title"),
-            );
-            ui.label("Due");
-            date_editor(ui, &mut self.edit_due_date);
-            ui.label("Estimate");
-            minutes_editor(ui, &mut self.edit_minutes);
-            if ui.button("Save").clicked() {
-                save = true;
-            }
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
-        });
-
-        if save {
-            self.save_task_edit();
-        } else if cancel {
-            self.clear_task_editor();
         }
     }
 
@@ -3301,22 +3179,7 @@ fn task_list(
     }
     scroll_area.show(ui, |ui| {
         for task in tasks {
-            let is_inline_editing = inline_task_edit
-                .as_ref()
-                .is_some_and(|edit| edit.task_id == task.id);
-            let row_height = match inline_task_edit.as_ref() {
-                Some(edit) if edit.task_id == task.id && edit.field == TaskInlineField::DueDate => {
-                    132.0
-                }
-                Some(edit)
-                    if edit.task_id == task.id
-                        && edit.field == TaskInlineField::EstimateMinutes =>
-                {
-                    112.0
-                }
-                _ if is_inline_editing => 116.0,
-                _ => 62.0,
-            };
+            let row_height = 64.0;
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), row_height),
                 egui::Layout::left_to_right(Align::Center),
@@ -3337,7 +3200,14 @@ fn task_list(
                                 .size(11.0)
                                 .color(palette.muted),
                         );
-                        ui.label(bold_text(task.title.as_str()).color(palette.text));
+                        inline_task_title(
+                            ui,
+                            id_salt,
+                            task,
+                            palette,
+                            inline_task_edit,
+                            &mut action,
+                        );
                         ui.horizontal(|ui| {
                             inline_task_meta(
                                 ui,
@@ -3392,9 +3262,6 @@ fn task_list(
                         } else {
                             if subtle_icon_button(ui, ICON_DELETE, "Delete", palette).clicked() {
                                 action = Some(TaskAction::RequestDelete(task.id.clone()));
-                            }
-                            if subtle_icon_button(ui, ICON_EDIT, "Edit", palette).clicked() {
-                                action = Some(TaskAction::Edit(task.id.clone()));
                             }
                         }
                     });
@@ -3503,6 +3370,64 @@ fn task_status_button(
         });
 }
 
+fn inline_task_title(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    task: &Task,
+    palette: Palette,
+    inline_task_edit: &mut Option<TaskInlineEdit>,
+    action: &mut Option<TaskAction>,
+) {
+    let is_editing = inline_task_edit
+        .as_ref()
+        .is_some_and(|edit| edit.task_id == task.id && edit.field == TaskInlineField::Title);
+
+    if is_editing {
+        let Some(edit) = inline_task_edit.as_mut() else {
+            return;
+        };
+        let response = ui.add_sized(
+            [ui.available_width().clamp(160.0, 420.0), 22.0],
+            inline_text_field(&mut edit.value, 420.0).id(ui.make_persistent_id((
+                id_salt,
+                "inline_title",
+                task.id.clone(),
+            ))),
+        );
+        if edit.focus {
+            response.request_focus();
+            edit.focus = false;
+        }
+
+        let enter = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let escape = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape {
+            *action = Some(TaskAction::CancelInlineEdit);
+        } else if enter || response.lost_focus() {
+            *action = Some(TaskAction::SaveInlineField(
+                task.id.clone(),
+                TaskInlineField::Title,
+                edit.value.clone(),
+            ));
+        }
+    } else {
+        let response = ui
+            .add(
+                egui::Label::new(bold_text(task.title.as_str()).color(palette.text))
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text("Double-click to edit");
+        if response.double_clicked() {
+            *inline_task_edit = Some(TaskInlineEdit {
+                task_id: task.id.clone(),
+                field: TaskInlineField::Title,
+                value: task.title.clone(),
+                focus: true,
+            });
+        }
+    }
+}
+
 fn inline_task_meta(
     ui: &mut egui::Ui,
     id_salt: &'static str,
@@ -3539,14 +3464,16 @@ fn inline_task_meta(
                 edit.focus = false;
             }
 
-            let selected = match field {
-                TaskInlineField::DueDate => {
-                    due_date_inline_options(ui, task, &mut edit.value, action, palette)
-                }
-                TaskInlineField::EstimateMinutes => {
-                    estimate_inline_options(ui, task, &mut edit.value, action, palette)
-                }
-            };
+            let selected = inline_task_meta_popup(
+                ui,
+                &response,
+                id_salt,
+                task,
+                field,
+                &mut edit.value,
+                action,
+                palette,
+            );
 
             let enter =
                 response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -3578,6 +3505,54 @@ fn inline_task_meta(
             });
         }
     }
+}
+
+fn inline_task_meta_popup(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    id_salt: &'static str,
+    task: &Task,
+    field: TaskInlineField,
+    value: &mut String,
+    action: &mut Option<TaskAction>,
+    palette: Palette,
+) -> bool {
+    let popup_id = ui.make_persistent_id((id_salt, "inline_meta_popup", task.id.clone(), field));
+    let mut selected = false;
+    let popup_width = match field {
+        TaskInlineField::DueDate => 260.0,
+        TaskInlineField::EstimateMinutes => 200.0,
+        TaskInlineField::Title => 0.0,
+    };
+    if popup_width <= 0.0 {
+        return false;
+    }
+
+    egui::Popup::from_response(response)
+        .id(popup_id)
+        .open(true)
+        .align(egui::RectAlign::BOTTOM_START)
+        .gap(4.0)
+        .width(popup_width)
+        .layout(egui::Layout::top_down(Align::Min))
+        .frame(
+            egui::Frame::popup(ui.style())
+                .fill(palette.surface)
+                .stroke(Stroke::new(1.0, palette.border)),
+        )
+        .show(|ui| {
+            selected = match field {
+                TaskInlineField::DueDate => {
+                    due_date_inline_options(ui, task, value, action, palette)
+                }
+                TaskInlineField::EstimateMinutes => {
+                    estimate_inline_options(ui, task, value, action, palette)
+                }
+                TaskInlineField::Title => false,
+            };
+        });
+
+    selected
 }
 
 fn due_date_inline_options(
