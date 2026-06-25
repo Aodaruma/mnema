@@ -15,3 +15,5 @@ anyhow = { workspace = true }
 tokio = { version = "1.48", features = ["full"] }
 time = { workspace = true }
 eframe = "0.34.3"
+muda = { version = "0.19.3", default-features = false }
+raw-window-handle = "0.6.2"

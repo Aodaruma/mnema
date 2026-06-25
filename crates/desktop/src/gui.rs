@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{
@@ -15,8 +15,11 @@ use mnema_app::{
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
+use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use time::{Date, OffsetDateTime, macros::format_description};
 use tokio::runtime::Runtime;
+
+static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
 
 pub fn run_gui(initial_vault_path: PathBuf) -> Result<()> {
     let native_options = eframe::NativeOptions {
@@ -54,10 +57,217 @@ enum ScheduleAction {
     SetState(ScheduleBlockId, ScheduleBlockState),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MenuAction {
+    Refresh,
+    Close,
+    SetView(View),
+    SetDarkMode(bool),
+}
+
 const INPUT_HEIGHT: f32 = 34.0;
 const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
+
+struct NativeMenu {
+    root: Menu,
+    refresh: MenuItem,
+    close: MenuItem,
+    today: MenuItem,
+    inbox: MenuItem,
+    schedule: MenuItem,
+    settings: MenuItem,
+    light_mode: CheckMenuItem,
+    dark_mode: CheckMenuItem,
+    #[cfg(target_os = "windows")]
+    hwnd: Option<isize>,
+}
+
+impl NativeMenu {
+    fn install(cc: &eframe::CreationContext<'_>, dark_mode: bool) -> Result<Self> {
+        install_menu_event_handler(&cc.egui_ctx);
+
+        let mut menu = Self::new(dark_mode)?;
+        menu.attach(cc, dark_mode)?;
+        Ok(menu)
+    }
+
+    fn new(dark_mode: bool) -> Result<Self> {
+        let refresh = MenuItem::with_id("mnema.file.refresh", "&Refresh", true, None);
+        let close = MenuItem::with_id("mnema.file.close", "&Close", true, None);
+        let file_separator = PredefinedMenuItem::separator();
+        let file_menu = Submenu::with_items("&File", true, &[&refresh, &file_separator, &close])?;
+
+        let undo = PredefinedMenuItem::undo(Some("&Undo"));
+        let redo = PredefinedMenuItem::redo(Some("&Redo"));
+        let cut = PredefinedMenuItem::cut(Some("Cu&t"));
+        let copy = PredefinedMenuItem::copy(Some("&Copy"));
+        let paste = PredefinedMenuItem::paste(Some("&Paste"));
+        let select_all = PredefinedMenuItem::select_all(Some("Select &All"));
+        let edit_separator_a = PredefinedMenuItem::separator();
+        let edit_separator_b = PredefinedMenuItem::separator();
+        let edit_menu = Submenu::with_items(
+            "&Edit",
+            true,
+            &[
+                &undo,
+                &redo,
+                &edit_separator_a,
+                &cut,
+                &copy,
+                &paste,
+                &edit_separator_b,
+                &select_all,
+            ],
+        )?;
+
+        let today = MenuItem::with_id("mnema.view.today", "&Today", true, None);
+        let inbox = MenuItem::with_id("mnema.view.inbox", "&Inbox", true, None);
+        let schedule = MenuItem::with_id("mnema.view.schedule", "&Schedule", true, None);
+        let settings = MenuItem::with_id("mnema.view.settings", "Se&ttings", true, None);
+        let light_mode =
+            CheckMenuItem::with_id("mnema.theme.light", "&Light mode", true, !dark_mode, None);
+        let dark_mode_item =
+            CheckMenuItem::with_id("mnema.theme.dark", "&Dark mode", true, dark_mode, None);
+        let view_separator = PredefinedMenuItem::separator();
+        let view_menu = Submenu::with_items(
+            "&View",
+            true,
+            &[
+                &today,
+                &inbox,
+                &schedule,
+                &settings,
+                &view_separator,
+                &light_mode,
+                &dark_mode_item,
+            ],
+        )?;
+
+        let about = MenuItem::with_id("mnema.help.about", "&About Mnema", false, None);
+        let help_menu = Submenu::with_items("&Help", true, &[&about])?;
+        let root = Menu::with_items(&[&file_menu, &edit_menu, &view_menu, &help_menu])?;
+
+        Ok(Self {
+            root,
+            refresh,
+            close,
+            today,
+            inbox,
+            schedule,
+            settings,
+            light_mode,
+            dark_mode: dark_mode_item,
+            #[cfg(target_os = "windows")]
+            hwnd: None,
+        })
+    }
+
+    fn attach(&mut self, cc: &eframe::CreationContext<'_>, dark_mode: bool) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = hwnd_from_creation_context(cc)?;
+            unsafe {
+                self.root
+                    .init_for_hwnd_with_theme(hwnd, menu_theme(dark_mode))?;
+            }
+            self.hwnd = Some(hwnd);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let _ = cc;
+            let _ = dark_mode;
+            self.root.init_for_nsapp();
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let _ = cc;
+            let _ = dark_mode;
+        }
+
+        Ok(())
+    }
+
+    fn sync_theme(&self, dark_mode: bool) {
+        self.light_mode.set_checked(!dark_mode);
+        self.dark_mode.set_checked(dark_mode);
+
+        #[cfg(target_os = "windows")]
+        if let Some(hwnd) = self.hwnd {
+            let _ = unsafe { self.root.set_theme_for_hwnd(hwnd, menu_theme(dark_mode)) };
+        }
+    }
+
+    fn action_for(&self, event: &MenuEvent) -> Option<MenuAction> {
+        let id = event.id().as_ref();
+        if id == self.refresh.id().as_ref() {
+            Some(MenuAction::Refresh)
+        } else if id == self.close.id().as_ref() {
+            Some(MenuAction::Close)
+        } else if id == self.today.id().as_ref() {
+            Some(MenuAction::SetView(View::Today))
+        } else if id == self.inbox.id().as_ref() {
+            Some(MenuAction::SetView(View::Inbox))
+        } else if id == self.schedule.id().as_ref() {
+            Some(MenuAction::SetView(View::Schedule))
+        } else if id == self.settings.id().as_ref() {
+            Some(MenuAction::SetView(View::Settings))
+        } else if id == self.light_mode.id().as_ref() {
+            Some(MenuAction::SetDarkMode(false))
+        } else if id == self.dark_mode.id().as_ref() {
+            Some(MenuAction::SetDarkMode(true))
+        } else {
+            None
+        }
+    }
+}
+
+fn menu_event_queue() -> &'static Mutex<Vec<MenuEvent>> {
+    MENU_EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn install_menu_event_handler(ctx: &egui::Context) {
+    let ctx = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |event| {
+        if let Ok(mut events) = menu_event_queue().lock() {
+            events.push(event);
+        }
+        ctx.request_repaint();
+    }));
+}
+
+fn drain_menu_events() -> Vec<MenuEvent> {
+    let Ok(mut events) = menu_event_queue().lock() else {
+        return Vec::new();
+    };
+    events.drain(..).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn hwnd_from_creation_context(cc: &eframe::CreationContext<'_>) -> Result<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = cc
+        .window_handle()
+        .map_err(|error| anyhow!("window handle unavailable: {error}"))?
+        .as_raw();
+    match handle {
+        RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get()),
+        _ => Err(anyhow!("unsupported native window handle for menu")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn menu_theme(dark_mode: bool) -> muda::MenuTheme {
+    if dark_mode {
+        muda::MenuTheme::Dark
+    } else {
+        muda::MenuTheme::Light
+    }
+}
 
 struct MnemaGuiApp {
     runtime: Runtime,
@@ -79,6 +289,8 @@ struct MnemaGuiApp {
     message: String,
     error: Option<String>,
     dark_mode: bool,
+    native_menu: Option<NativeMenu>,
+    native_menu_synced_dark_mode: Option<bool>,
 }
 
 impl MnemaGuiApp {
@@ -86,6 +298,14 @@ impl MnemaGuiApp {
         configure_fonts(&cc.egui_ctx);
         let dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
         configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 }, dark_mode);
+        let native_menu = match NativeMenu::install(cc, dark_mode) {
+            Ok(menu) => Some(menu),
+            Err(error) => {
+                tracing::warn!(?error, "failed to install native menu");
+                None
+            }
+        };
+        let native_menu_synced_dark_mode = native_menu.as_ref().map(|_| dark_mode);
 
         let today = OffsetDateTime::now_utc().date().to_string();
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
@@ -109,6 +329,8 @@ impl MnemaGuiApp {
             message: String::new(),
             error: None,
             dark_mode,
+            native_menu,
+            native_menu_synced_dark_mode,
         };
         app.connect_and_refresh();
         app
@@ -508,10 +730,54 @@ impl MnemaGuiApp {
     fn set_error(&mut self, error: anyhow::Error) {
         self.error = Some(error.to_string());
     }
+
+    fn handle_native_menu(&mut self, ctx: &egui::Context) {
+        let actions = self
+            .native_menu
+            .as_ref()
+            .map(|menu| {
+                drain_menu_events()
+                    .iter()
+                    .filter_map(|event| menu.action_for(event))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        for action in actions {
+            self.handle_menu_action(action, ctx);
+        }
+
+        self.sync_native_menu_theme();
+    }
+
+    fn handle_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
+        match action {
+            MenuAction::Refresh => {
+                self.refresh_tasks();
+                self.refresh_schedule();
+            }
+            MenuAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            MenuAction::SetView(view) => self.view = view,
+            MenuAction::SetDarkMode(dark_mode) => self.dark_mode = dark_mode,
+        }
+    }
+
+    fn sync_native_menu_theme(&mut self) {
+        if self.native_menu_synced_dark_mode == Some(self.dark_mode) {
+            return;
+        }
+
+        if let Some(menu) = &self.native_menu {
+            menu.sync_theme(self.dark_mode);
+            self.native_menu_synced_dark_mode = Some(self.dark_mode);
+        }
+    }
 }
 
 impl eframe::App for MnemaGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.handle_native_menu(ui.ctx());
+
         let dark_factor = ui.ctx().animate_bool_with_time(
             egui::Id::new("mnema_theme_transition"),
             self.dark_mode,
@@ -547,6 +813,7 @@ impl eframe::App for MnemaGuiApp {
             });
             ui.add_space(8.0);
         });
+        self.sync_native_menu_theme();
 
         egui::Panel::left("navigation")
             .resizable(false)
