@@ -45,6 +45,7 @@ pub fn run_gui(initial_vault_path: PathBuf) -> Result<()> {
 enum View {
     Today,
     Inbox,
+    Projects,
     Schedule,
     Assistant,
     Activity,
@@ -159,6 +160,7 @@ struct NativeMenu {
     close: MenuItem,
     today: MenuItem,
     inbox: MenuItem,
+    projects: MenuItem,
     schedule: MenuItem,
     assistant: MenuItem,
     activity: MenuItem,
@@ -209,6 +211,7 @@ impl NativeMenu {
 
         let today = MenuItem::with_id("mnema.view.today", "&Today", true, None);
         let inbox = MenuItem::with_id("mnema.view.inbox", "&Inbox", true, None);
+        let projects = MenuItem::with_id("mnema.view.projects", "&Projects", true, None);
         let schedule = MenuItem::with_id("mnema.view.schedule", "&Schedule", true, None);
         let assistant = MenuItem::with_id("mnema.view.assistant", "&Assistant", true, None);
         let activity = MenuItem::with_id("mnema.view.activity", "Acti&vity", true, None);
@@ -224,6 +227,7 @@ impl NativeMenu {
             &[
                 &today,
                 &inbox,
+                &projects,
                 &schedule,
                 &assistant,
                 &activity,
@@ -244,6 +248,7 @@ impl NativeMenu {
             close,
             today,
             inbox,
+            projects,
             schedule,
             assistant,
             activity,
@@ -302,6 +307,8 @@ impl NativeMenu {
             Some(MenuAction::SetView(View::Today))
         } else if id == self.inbox.id().as_ref() {
             Some(MenuAction::SetView(View::Inbox))
+        } else if id == self.projects.id().as_ref() {
+            Some(MenuAction::SetView(View::Projects))
         } else if id == self.schedule.id().as_ref() {
             Some(MenuAction::SetView(View::Schedule))
         } else if id == self.assistant.id().as_ref() {
@@ -394,6 +401,16 @@ struct MnemaGuiApp {
     confirm_plan_save: bool,
     target_date: String,
     tasks: Vec<Task>,
+    projects: Vec<Project>,
+    selected_project_id: Option<ProjectId>,
+    project_lists: Vec<List>,
+    milestones: Vec<Milestone>,
+    project_title: String,
+    project_start_date: String,
+    project_end_date: String,
+    project_list_name: String,
+    milestone_title: String,
+    milestone_target_date: String,
     plan: Option<PlanTodayResult>,
     schedule: Vec<ScheduleBlock>,
     automation_logs: Vec<AutomationLog>,
@@ -456,8 +473,18 @@ impl MnemaGuiApp {
             schedule_edit_start: String::new(),
             schedule_edit_end: String::new(),
             confirm_plan_save: false,
-            target_date: today,
+            target_date: today.clone(),
             tasks: Vec::new(),
+            projects: Vec::new(),
+            selected_project_id: None,
+            project_lists: Vec::new(),
+            milestones: Vec::new(),
+            project_title: String::new(),
+            project_start_date: today.clone(),
+            project_end_date: String::new(),
+            project_list_name: String::new(),
+            milestone_title: String::new(),
+            milestone_target_date: today.clone(),
             plan: None,
             schedule: Vec::new(),
             automation_logs: Vec::new(),
@@ -499,6 +526,7 @@ impl MnemaGuiApp {
                 self.settings_message = String::from("Connected");
                 self.error = None;
                 self.refresh_tasks();
+                self.refresh_projects();
                 self.refresh_schedule();
                 self.refresh_automation_logs();
             }
@@ -525,6 +553,64 @@ impl MnemaGuiApp {
         match result {
             Ok(tasks) => {
                 self.tasks = tasks;
+                self.error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn refresh_projects(&mut self) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let project_repo = vault.project_repo();
+            let mut projects = project_repo.list_all().await?;
+            projects.sort_by(|left, right| left.title.cmp(&right.title));
+            Result::<Vec<Project>>::Ok(projects)
+        });
+
+        match result {
+            Ok(projects) => {
+                if let Some(selected) = &self.selected_project_id {
+                    if !projects.iter().any(|project| &project.id == selected) {
+                        self.selected_project_id = None;
+                        self.project_lists.clear();
+                        self.milestones.clear();
+                    }
+                }
+                self.projects = projects;
+                self.error = None;
+                self.refresh_project_children();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn refresh_project_children(&mut self) {
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.project_lists.clear();
+            self.milestones.clear();
+            return;
+        };
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let lists = vault
+                .list_repo()
+                .list_by_project(project_id.clone())
+                .await?;
+            let milestones = vault.milestone_repo().list_by_project(project_id).await?;
+            Result::<(Vec<List>, Vec<Milestone>)>::Ok((lists, milestones))
+        });
+
+        match result {
+            Ok((mut lists, mut milestones)) => {
+                lists.sort_by_key(|list| list.order);
+                milestones.sort_by_key(|milestone| milestone.target_date);
+                self.project_lists = lists;
+                self.milestones = milestones;
                 self.error = None;
             }
             Err(error) => self.set_error(error),
@@ -1104,6 +1190,141 @@ impl MnemaGuiApp {
         }
     }
 
+    fn add_project(&mut self) {
+        let title = self.project_title.trim().to_string();
+        if title.is_empty() {
+            self.set_error(anyhow!("プロジェクト名を入力してください"));
+            return;
+        }
+        let start_date = match parse_optional_date(&self.project_start_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let end_date = match parse_optional_date(&self.project_end_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let project = Project {
+            id: ProjectId::new(),
+            title,
+            description: None,
+            start_date,
+            end_date,
+            default_status_set_id: None,
+            archived_at: None,
+        };
+        let project_id = project.id.clone();
+        let result = self.runtime.block_on(async move {
+            vault.project_repo().insert(project.clone()).await?;
+            Result::<Project>::Ok(project)
+        });
+
+        match result {
+            Ok(project) => {
+                self.message = format!("Project added: {}", project.title);
+                self.project_title.clear();
+                self.project_end_date.clear();
+                self.selected_project_id = Some(project_id);
+                self.refresh_projects();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn add_project_list(&mut self) {
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.set_error(anyhow!("プロジェクトを選択してください"));
+            return;
+        };
+        let name = self.project_list_name.trim().to_string();
+        if name.is_empty() {
+            self.set_error(anyhow!("リスト名を入力してください"));
+            return;
+        }
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let order = self.project_lists.len() as i32;
+        let list = List {
+            id: ListId::new(),
+            project_id: Some(project_id),
+            name,
+            is_system: false,
+            kind: ListKind::Project,
+            view_type: ListViewType::List,
+            order,
+        };
+        let result = self.runtime.block_on(async move {
+            vault.list_repo().insert(list.clone()).await?;
+            Result::<List>::Ok(list)
+        });
+
+        match result {
+            Ok(list) => {
+                self.message = format!("List added: {}", list.name);
+                self.project_list_name.clear();
+                self.refresh_project_children();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn add_milestone(&mut self) {
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.set_error(anyhow!("プロジェクトを選択してください"));
+            return;
+        };
+        let title = self.milestone_title.trim().to_string();
+        if title.is_empty() {
+            self.set_error(anyhow!("マイルストーン名を入力してください"));
+            return;
+        }
+        let target_date = match parse_required_date(&self.milestone_target_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let now = OffsetDateTime::now_utc();
+        let milestone = Milestone {
+            id: MilestoneId::new(),
+            project_id,
+            title,
+            description: None,
+            target_date,
+            status: MilestoneStatus::NotDone,
+            dependency_task_ids: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self.runtime.block_on(async move {
+            vault.milestone_repo().insert(milestone.clone()).await?;
+            Result::<Milestone>::Ok(milestone)
+        });
+
+        match result {
+            Ok(milestone) => {
+                self.message = format!("Milestone added: {}", milestone.title);
+                self.milestone_title.clear();
+                self.refresh_project_children();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn plan_today(&mut self, save: bool) {
         let Ok(vault) = self.vault_clone() else {
             return;
@@ -1204,6 +1425,14 @@ impl MnemaGuiApp {
         } else {
             trimmed.to_string()
         }
+    }
+
+    fn selected_project_title(&self) -> Option<String> {
+        let selected_id = self.selected_project_id.as_ref()?;
+        self.projects
+            .iter()
+            .find(|project| &project.id == selected_id)
+            .map(|project| project.title.clone())
     }
 
     fn save_settings(&mut self) {
@@ -1318,6 +1547,7 @@ impl eframe::App for MnemaGuiApp {
                     theme_toggle(ui, &mut self.dark_mode, palette);
                     if ui.button("Refresh").clicked() {
                         self.refresh_tasks();
+                        self.refresh_projects();
                         self.refresh_schedule();
                         self.refresh_automation_logs();
                     }
@@ -1342,6 +1572,7 @@ impl eframe::App for MnemaGuiApp {
                 ui.add_space(12.0);
                 nav_button(ui, &mut self.view, View::Today, "Today");
                 nav_button(ui, &mut self.view, View::Inbox, "Inbox");
+                nav_button(ui, &mut self.view, View::Projects, "Projects");
                 nav_button(ui, &mut self.view, View::Schedule, "Schedule");
                 nav_button(ui, &mut self.view, View::Assistant, "Assistant");
                 nav_button(ui, &mut self.view, View::Activity, "Activity");
@@ -1362,6 +1593,7 @@ impl eframe::App for MnemaGuiApp {
         egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
             View::Today => self.show_today(ui, palette),
             View::Inbox => self.show_inbox(ui, palette),
+            View::Projects => self.show_projects(ui, palette),
             View::Schedule => self.show_schedule(ui, palette),
             View::Assistant => self.show_assistant(ui, palette),
             View::Activity => self.show_activity(ui, palette),
@@ -1482,6 +1714,129 @@ impl MnemaGuiApp {
                 self.send_assistant_message();
             }
         });
+    }
+
+    fn show_projects(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Projects", palette);
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [260.0, INPUT_HEIGHT],
+                text_field(&mut self.project_title, "Project title"),
+            );
+            ui.label("Start");
+            date_editor(ui, &mut self.project_start_date);
+            ui.label("End");
+            date_editor(ui, &mut self.project_end_date);
+            if ui.button("Add").clicked() {
+                self.add_project();
+            }
+        });
+        ui.add_space(12.0);
+
+        let mut select_project = None;
+        ui.columns(2, |columns| {
+            columns[0].label(bold_text("Projects").color(palette.section));
+            columns[0].add_space(6.0);
+            ScrollArea::vertical()
+                .max_height(520.0)
+                .show(&mut columns[0], |ui| {
+                    for project in &self.projects {
+                        let selected = self.selected_project_id.as_ref() == Some(&project.id);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [120.0, 30.0],
+                                    egui::Button::selectable(selected, "Select"),
+                                )
+                                .clicked()
+                            {
+                                select_project = Some(project.id.clone());
+                            }
+                            ui.label(bold_text(project.title.as_str()));
+                        });
+                        let mut fields = Vec::new();
+                        if let Some(start_date) = project.start_date {
+                            fields.push(format!("start {start_date}"));
+                        }
+                        if let Some(end_date) = project.end_date {
+                            fields.push(format!("end {end_date}"));
+                        }
+                        if !fields.is_empty() {
+                            ui.label(regular_text(fields.join(", ")).color(palette.muted));
+                        }
+                        ui.separator();
+                    }
+                });
+
+            columns[1].label(bold_text("Selected").color(palette.section));
+            columns[1].add_space(6.0);
+            if let Some(project_title) = self.selected_project_title() {
+                columns[1].label(bold_text(project_title));
+                columns[1].add_space(8.0);
+                self.show_project_children(&mut columns[1], palette);
+            } else {
+                columns[1].label("No project selected.");
+            }
+        });
+
+        if let Some(project_id) = select_project {
+            self.selected_project_id = Some(project_id);
+            self.refresh_project_children();
+        }
+    }
+
+    fn show_project_children(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        ui.label(bold_text("Lists").color(palette.section));
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [220.0, INPUT_HEIGHT],
+                text_field(&mut self.project_list_name, "List name"),
+            );
+            if ui.button("Add list").clicked() {
+                self.add_project_list();
+            }
+        });
+        ui.add_space(6.0);
+        if self.project_lists.is_empty() {
+            ui.label("No lists.");
+        } else {
+            for list in &self.project_lists {
+                ui.label(format!(
+                    "{} · {}",
+                    list.name,
+                    list_view_type_label(&list.view_type)
+                ));
+            }
+        }
+
+        ui.add_space(14.0);
+        ui.label(bold_text("Milestones").color(palette.section));
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [220.0, INPUT_HEIGHT],
+                text_field(&mut self.milestone_title, "Milestone title"),
+            );
+            ui.label("Target");
+            date_editor(ui, &mut self.milestone_target_date);
+            if ui.button("Add milestone").clicked() {
+                self.add_milestone();
+            }
+        });
+        ui.add_space(6.0);
+        if self.milestones.is_empty() {
+            ui.label("No milestones.");
+        } else {
+            for milestone in &self.milestones {
+                ui.horizontal(|ui| {
+                    ui.label(bold_text(milestone.title.as_str()));
+                    ui.label(regular_text(milestone.target_date.to_string()).color(palette.due));
+                    ui.label(
+                        regular_text(milestone_status_label(&milestone.status))
+                            .color(palette.muted),
+                    );
+                });
+            }
+        }
     }
 
     fn show_activity(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -2723,6 +3078,23 @@ fn schedule_state_label(state: &ScheduleBlockState) -> &'static str {
         ScheduleBlockState::Done => "done",
         ScheduleBlockState::Missed => "missed",
         ScheduleBlockState::Cancelled => "cancelled",
+    }
+}
+
+fn list_view_type_label(view_type: &ListViewType) -> &'static str {
+    match view_type {
+        ListViewType::List => "list",
+        ListViewType::Board => "board",
+        ListViewType::Calendar => "calendar",
+        ListViewType::Gantt => "gantt",
+    }
+}
+
+fn milestone_status_label(status: &MilestoneStatus) -> &'static str {
+    match status {
+        MilestoneStatus::NotDone => "not done",
+        MilestoneStatus::Overdue => "overdue",
+        MilestoneStatus::Done => "done",
     }
 }
 
