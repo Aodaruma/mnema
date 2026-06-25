@@ -21,7 +21,7 @@ use mnema_infra::{
 };
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
-use time::{Date, OffsetDateTime, Time, macros::format_description};
+use time::{Date, Month, OffsetDateTime, Time, macros::format_description};
 use tokio::runtime::Runtime;
 
 static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
@@ -51,6 +51,12 @@ enum View {
     Assistant,
     Activity,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleViewMode {
+    Day,
+    Calendar,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +409,7 @@ struct MnemaGuiApp {
     confirm_repair_save: bool,
     target_date: String,
     repair_from_time: String,
+    schedule_view_mode: ScheduleViewMode,
     tasks: Vec<Task>,
     projects: Vec<Project>,
     selected_project_id: Option<ProjectId>,
@@ -416,6 +423,7 @@ struct MnemaGuiApp {
     milestone_target_date: String,
     plan: Option<PlanTodayResult>,
     schedule: Vec<ScheduleBlock>,
+    schedule_month: Vec<ScheduleBlock>,
     automation_logs: Vec<AutomationLog>,
     message: String,
     error: Option<String>,
@@ -480,6 +488,7 @@ impl MnemaGuiApp {
             confirm_repair_save: false,
             target_date: today.clone(),
             repair_from_time: current_time,
+            schedule_view_mode: ScheduleViewMode::Day,
             tasks: Vec::new(),
             projects: Vec::new(),
             selected_project_id: None,
@@ -493,6 +502,7 @@ impl MnemaGuiApp {
             milestone_target_date: today.clone(),
             plan: None,
             schedule: Vec::new(),
+            schedule_month: Vec::new(),
             automation_logs: Vec::new(),
             message: String::new(),
             error: None,
@@ -534,6 +544,7 @@ impl MnemaGuiApp {
                 self.refresh_tasks();
                 self.refresh_projects();
                 self.refresh_schedule();
+                self.refresh_schedule_month();
                 self.refresh_automation_logs();
             }
             Err(error) => self.set_error(error),
@@ -971,6 +982,45 @@ impl MnemaGuiApp {
         }
     }
 
+    fn refresh_schedule_month(&mut self) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let target_date = match parse_required_date(&self.target_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let days = match dates_in_month(target_date) {
+            Ok(days) => days,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+
+        let result = self.runtime.block_on(async move {
+            let schedule_block_repo = vault.schedule_block_repo();
+            let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
+            let mut blocks = Vec::new();
+            for day in days {
+                blocks.extend(store.list_for_day(day).await?);
+            }
+            blocks.sort_by_key(|block| (block.start_at, block.end_at));
+            Result::<Vec<ScheduleBlock>>::Ok(blocks)
+        });
+
+        match result {
+            Ok(blocks) => {
+                self.schedule_month = blocks;
+                self.error = None;
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn refresh_automation_logs(&mut self) {
         let Ok(vault) = self.vault_clone() else {
             return;
@@ -1014,6 +1064,7 @@ impl MnemaGuiApp {
                 );
                 self.error = None;
                 self.refresh_schedule();
+                self.refresh_schedule_month();
             }
             Err(error) => self.set_error(error),
         }
@@ -1085,6 +1136,7 @@ impl MnemaGuiApp {
                 self.error = None;
                 self.clear_schedule_block_editor();
                 self.refresh_schedule();
+                self.refresh_schedule_month();
             }
             Err(error) => self.set_error(error),
         }
@@ -1386,6 +1438,7 @@ impl MnemaGuiApp {
                 self.error = None;
                 if save {
                     self.refresh_schedule();
+                    self.refresh_schedule_month();
                 }
             }
             Err(error) => self.set_error(error),
@@ -1473,6 +1526,7 @@ impl MnemaGuiApp {
                 self.error = None;
                 if save {
                     self.refresh_schedule();
+                    self.refresh_schedule_month();
                 }
             }
             Err(error) => self.set_error(error),
@@ -1597,6 +1651,7 @@ impl MnemaGuiApp {
             MenuAction::Refresh => {
                 self.refresh_tasks();
                 self.refresh_schedule();
+                self.refresh_schedule_month();
             }
             MenuAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             MenuAction::SetView(view) => self.view = view,
@@ -1643,6 +1698,7 @@ impl eframe::App for MnemaGuiApp {
                         self.refresh_tasks();
                         self.refresh_projects();
                         self.refresh_schedule();
+                        self.refresh_schedule_month();
                         self.refresh_automation_logs();
                     }
                     let backend = self
@@ -1996,10 +2052,30 @@ impl MnemaGuiApp {
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Schedule", palette);
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.schedule_view_mode, ScheduleViewMode::Day, "Day");
+            ui.selectable_value(
+                &mut self.schedule_view_mode,
+                ScheduleViewMode::Calendar,
+                "Calendar",
+            );
+            ui.separator();
             ui.label("Date");
             date_editor(ui, &mut self.target_date);
+            if self.schedule_view_mode == ScheduleViewMode::Calendar {
+                if ui.button("Prev month").clicked() {
+                    shift_month(&mut self.target_date, -1);
+                    self.refresh_schedule();
+                    self.refresh_schedule_month();
+                }
+                if ui.button("Next month").clicked() {
+                    shift_month(&mut self.target_date, 1);
+                    self.refresh_schedule();
+                    self.refresh_schedule_month();
+                }
+            }
             if ui.button("Load").clicked() {
                 self.refresh_schedule();
+                self.refresh_schedule_month();
             }
         });
         ui.add_space(12.0);
@@ -2012,15 +2088,34 @@ impl MnemaGuiApp {
             }
         };
 
-        if self.schedule.is_empty() {
-            ui.label("No saved schedule blocks.");
-            return;
-        }
+        match self.schedule_view_mode {
+            ScheduleViewMode::Day => {
+                if self.schedule.is_empty() {
+                    ui.label("No saved schedule blocks.");
+                    return;
+                }
 
-        if let Some(action) = schedule_calendar_view(ui, target_date, &self.schedule, palette) {
-            self.handle_schedule_action(action);
+                if let Some(action) =
+                    schedule_calendar_view(ui, target_date, &self.schedule, palette)
+                {
+                    self.handle_schedule_action(action);
+                }
+                self.show_schedule_block_editor(ui, palette);
+            }
+            ScheduleViewMode::Calendar => {
+                if let Some(selected_date) =
+                    schedule_month_calendar(ui, target_date, &self.schedule_month, palette)
+                {
+                    let month_changed = selected_date.month() != target_date.month()
+                        || selected_date.year() != target_date.year();
+                    self.target_date = selected_date.to_string();
+                    self.refresh_schedule();
+                    if month_changed {
+                        self.refresh_schedule_month();
+                    }
+                }
+            }
         }
-        self.show_schedule_block_editor(ui, palette);
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -2519,6 +2614,16 @@ fn shift_date(value: &mut String, days: i64) {
     *value = shifted.to_string();
 }
 
+fn shift_month(value: &mut String, months: i32) {
+    let base = parse_optional_date(value)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| OffsetDateTime::now_utc().date());
+    if let Ok(shifted) = add_months(base, months) {
+        *value = shifted.to_string();
+    }
+}
+
 fn minutes_editor(ui: &mut egui::Ui, value: &mut String) {
     let mut minutes = value.trim().parse::<u32>().unwrap_or(0);
     let response = ui.add_sized(
@@ -2766,6 +2871,170 @@ fn schedule_calendar_view(
     action
 }
 
+fn schedule_month_calendar(
+    ui: &mut egui::Ui,
+    target_date: Date,
+    blocks: &[ScheduleBlock],
+    palette: Palette,
+) -> Option<Date> {
+    let first_day = match first_day_of_month(target_date) {
+        Ok(first_day) => first_day,
+        Err(error) => {
+            ui.colored_label(palette.error, error.to_string());
+            return None;
+        }
+    };
+
+    let mut selected_date = None;
+    ui.horizontal(|ui| {
+        ui.label(bold_text(format!(
+            "{} {}",
+            month_label(target_date.month()),
+            target_date.year()
+        )));
+        ui.label(regular_text(format!("{} blocks", blocks.len())).color(palette.muted));
+    });
+    ui.add_space(8.0);
+
+    let column_gap = 6.0;
+    let cell_width = ((ui.available_width() - column_gap * 6.0) / 7.0).clamp(92.0, 168.0);
+    let cell_height = 112.0;
+
+    ui.horizontal(|ui| {
+        for label in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
+            ui.add_sized(
+                [cell_width, 20.0],
+                egui::Label::new(regular_text(label).color(palette.muted)),
+            );
+        }
+    });
+    ui.add_space(4.0);
+
+    let mut cell_date = calendar_grid_start(first_day);
+    for _ in 0..6 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = column_gap;
+            for _ in 0..7 {
+                let date = cell_date;
+                let day_blocks = blocks
+                    .iter()
+                    .filter(|block| block.start_at.date() == date)
+                    .collect::<Vec<_>>();
+                let in_month =
+                    date.month() == target_date.month() && date.year() == target_date.year();
+                let selected = date == target_date;
+                let (rect, response) = ui
+                    .allocate_exact_size(egui::vec2(cell_width, cell_height), egui::Sense::click());
+                draw_calendar_day_cell(
+                    ui.painter(),
+                    rect,
+                    date,
+                    &day_blocks,
+                    in_month,
+                    selected,
+                    palette,
+                );
+                if response.clicked() {
+                    selected_date = Some(date);
+                }
+                cell_date = cell_date.next_day().unwrap_or(cell_date);
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    selected_date
+}
+
+fn draw_calendar_day_cell(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    date: Date,
+    blocks: &[&ScheduleBlock],
+    in_month: bool,
+    selected: bool,
+    palette: Palette,
+) {
+    let fill = if selected {
+        palette.selected_fill
+    } else if in_month {
+        palette.surface
+    } else {
+        palette.faint
+    };
+    let stroke = if selected {
+        palette.accent
+    } else {
+        palette.border
+    };
+    painter.rect(
+        rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+
+    let text_color = if in_month {
+        palette.text
+    } else {
+        palette.muted
+    };
+    painter.text(
+        rect.left_top() + egui::vec2(8.0, 7.0),
+        egui::Align2::LEFT_TOP,
+        date.day().to_string(),
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+
+    if blocks.is_empty() {
+        return;
+    }
+
+    let total_minutes = blocks
+        .iter()
+        .map(|block| schedule_block_minutes(block))
+        .sum::<i64>();
+    painter.text(
+        rect.right_top() + egui::vec2(-8.0, 8.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{}m", total_minutes),
+        egui::FontId::proportional(12.0),
+        palette.muted,
+    );
+
+    let mut y = rect.top() + 30.0;
+    for block in blocks.iter().take(3) {
+        let color = schedule_state_text_color(&block.state, palette);
+        let dot_rect =
+            egui::Rect::from_min_size(egui::pos2(rect.left() + 8.0, y + 4.0), egui::vec2(6.0, 6.0));
+        painter.rect_filled(dot_rect, 3.0, color);
+        let title = block
+            .title_snapshot
+            .as_deref()
+            .unwrap_or("(untitled block)");
+        painter.text(
+            egui::pos2(rect.left() + 20.0, y),
+            egui::Align2::LEFT_TOP,
+            truncate_chars(&format!("{} {}", format_hm(block.start_at), title), 22),
+            egui::FontId::proportional(12.0),
+            text_color,
+        );
+        y += 18.0;
+    }
+
+    if blocks.len() > 3 {
+        painter.text(
+            egui::pos2(rect.left() + 20.0, y),
+            egui::Align2::LEFT_TOP,
+            format!("+{} more", blocks.len() - 3),
+            egui::FontId::proportional(12.0),
+            palette.muted,
+        );
+    }
+}
+
 fn schedule_timeline(
     ui: &mut egui::Ui,
     target_date: Date,
@@ -2993,6 +3262,84 @@ fn schedule_state_text_color(state: &ScheduleBlockState, palette: Palette) -> Co
 
 fn schedule_block_minutes(block: &ScheduleBlock) -> i64 {
     (block.end_at - block.start_at).whole_minutes().max(0)
+}
+
+fn first_day_of_month(date: Date) -> Result<Date> {
+    Ok(Date::from_calendar_date(date.year(), date.month(), 1)?)
+}
+
+fn dates_in_month(date: Date) -> Result<Vec<Date>> {
+    let first_day = first_day_of_month(date)?;
+    let mut days = Vec::new();
+    let mut day = first_day;
+    while day.month() == first_day.month() && day.year() == first_day.year() {
+        days.push(day);
+        let Some(next_day) = day.next_day() else {
+            break;
+        };
+        day = next_day;
+    }
+    Ok(days)
+}
+
+fn calendar_grid_start(first_day: Date) -> Date {
+    let mut date = first_day;
+    for _ in 0..first_day.weekday().number_days_from_monday() {
+        date = date.previous_day().unwrap_or(date);
+    }
+    date
+}
+
+fn add_months(date: Date, months: i32) -> Result<Date> {
+    let zero_based_month = date.year() * 12 + (date.month() as i32 - 1) + months;
+    let year = zero_based_month.div_euclid(12);
+    let month_index = zero_based_month.rem_euclid(12) + 1;
+    let month = Month::try_from(month_index as u8)?;
+    let day = date.day().min(days_in_month(year, month)?);
+    Ok(Date::from_calendar_date(year, month, day)?)
+}
+
+fn days_in_month(year: i32, month: Month) -> Result<u8> {
+    let month_number = month as u8;
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, Month::January)
+    } else {
+        (year, Month::try_from(month_number + 1)?)
+    };
+    let first_next_month = Date::from_calendar_date(next_year, next_month, 1)?;
+    Ok(first_next_month
+        .previous_day()
+        .ok_or_else(|| anyhow!("invalid month"))?
+        .day())
+}
+
+fn month_label(month: Month) -> &'static str {
+    match month {
+        Month::January => "January",
+        Month::February => "February",
+        Month::March => "March",
+        Month::April => "April",
+        Month::May => "May",
+        Month::June => "June",
+        Month::July => "July",
+        Month::August => "August",
+        Month::September => "September",
+        Month::October => "October",
+        Month::November => "November",
+        Month::December => "December",
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 async fn done_status_ids(
