@@ -91,6 +91,14 @@ struct TaskInlineEdit {
 }
 
 #[derive(Debug, Clone)]
+struct StatusHistoryEntry {
+    task_id: TaskId,
+    task_title: String,
+    before_status_id: StatusId,
+    after_status_id: StatusId,
+}
+
+#[derive(Debug, Clone)]
 enum ScheduleAction {
     Edit(ScheduleBlockId),
     SetState(ScheduleBlockId, ScheduleBlockState),
@@ -100,6 +108,8 @@ enum ScheduleAction {
 enum MenuAction {
     Refresh,
     Close,
+    Undo,
+    Redo,
     SetView(View),
     SetDarkMode(bool),
 }
@@ -206,6 +216,8 @@ struct NativeMenu {
     root: Menu,
     refresh: MenuItem,
     close: MenuItem,
+    undo: PredefinedMenuItem,
+    redo: PredefinedMenuItem,
     home: MenuItem,
     inbox: MenuItem,
     projects: MenuItem,
@@ -294,6 +306,8 @@ impl NativeMenu {
             root,
             refresh,
             close,
+            undo,
+            redo,
             home,
             inbox,
             projects,
@@ -351,6 +365,10 @@ impl NativeMenu {
             Some(MenuAction::Refresh)
         } else if id == self.close.id().as_ref() {
             Some(MenuAction::Close)
+        } else if id == self.undo.id().as_ref() {
+            Some(MenuAction::Undo)
+        } else if id == self.redo.id().as_ref() {
+            Some(MenuAction::Redo)
         } else if id == self.home.id().as_ref() {
             Some(MenuAction::SetView(View::Home))
         } else if id == self.inbox.id().as_ref() {
@@ -472,6 +490,8 @@ struct MnemaGuiApp {
     schedule: Vec<ScheduleBlock>,
     schedule_month: Vec<ScheduleBlock>,
     automation_logs: Vec<AutomationLog>,
+    undo_stack: Vec<StatusHistoryEntry>,
+    redo_stack: Vec<StatusHistoryEntry>,
     message: String,
     error: Option<String>,
     dark_mode: bool,
@@ -557,6 +577,8 @@ impl MnemaGuiApp {
             schedule: Vec::new(),
             schedule_month: Vec::new(),
             automation_logs: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             message: String::new(),
             error: None,
             dark_mode,
@@ -594,6 +616,8 @@ impl MnemaGuiApp {
                 self.message = String::from("Vault connected");
                 self.settings_message = String::from("Connected");
                 self.error = None;
+                self.undo_stack.clear();
+                self.redo_stack.clear();
                 self.refresh_tasks();
                 self.refresh_projects();
                 self.refresh_task_context();
@@ -742,9 +766,13 @@ impl MnemaGuiApp {
         }
     }
 
-    fn update_task_status(&mut self, task_id: TaskId, status_id: StatusId) {
+    fn persist_task_status(
+        &mut self,
+        task_id: TaskId,
+        status_id: StatusId,
+    ) -> Result<(Task, StatusId)> {
         let Ok(vault) = self.vault_clone() else {
-            return;
+            return Err(anyhow!("vault is not connected"));
         };
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
@@ -753,14 +781,33 @@ impl MnemaGuiApp {
                 .await?
                 .filter(|task| task.deleted_at.is_none())
                 .ok_or_else(|| anyhow!("task not found"))?;
+            let previous_status_id = task.status_id.clone();
+            if previous_status_id == status_id {
+                return Result::<(Task, StatusId)>::Ok((task, previous_status_id));
+            }
             task.status_id = status_id;
             task.updated_at = OffsetDateTime::now_utc();
             task_repo.update(task.clone()).await?;
-            Result::<Task>::Ok(task)
+            Result::<(Task, StatusId)>::Ok((task, previous_status_id))
         });
 
+        result
+    }
+
+    fn update_task_status(&mut self, task_id: TaskId, status_id: StatusId) {
+        let result = self.persist_task_status(task_id, status_id);
+
         match result {
-            Ok(task) => {
+            Ok((task, previous_status_id)) => {
+                if previous_status_id != task.status_id {
+                    self.undo_stack.push(StatusHistoryEntry {
+                        task_id: task.id.clone(),
+                        task_title: task.title.clone(),
+                        before_status_id: previous_status_id,
+                        after_status_id: task.status_id.clone(),
+                    });
+                    self.redo_stack.clear();
+                }
                 self.message = format!("Updated status: {}", task.title);
                 self.error = None;
                 self.refresh_tasks();
@@ -768,6 +815,50 @@ impl MnemaGuiApp {
                 self.refresh_schedule_month();
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn undo_status_change(&mut self) {
+        let Some(entry) = self.undo_stack.pop() else {
+            self.message = String::from("Nothing to undo");
+            return;
+        };
+
+        match self.persist_task_status(entry.task_id.clone(), entry.before_status_id.clone()) {
+            Ok((_task, _)) => {
+                self.message = format!("Undid status: {}", entry.task_title);
+                self.error = None;
+                self.redo_stack.push(entry);
+                self.refresh_tasks();
+                self.refresh_schedule();
+                self.refresh_schedule_month();
+            }
+            Err(error) => {
+                self.undo_stack.push(entry);
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn redo_status_change(&mut self) {
+        let Some(entry) = self.redo_stack.pop() else {
+            self.message = String::from("Nothing to redo");
+            return;
+        };
+
+        match self.persist_task_status(entry.task_id.clone(), entry.after_status_id.clone()) {
+            Ok((_task, _)) => {
+                self.message = format!("Redid status: {}", entry.task_title);
+                self.error = None;
+                self.undo_stack.push(entry);
+                self.refresh_tasks();
+                self.refresh_schedule();
+                self.refresh_schedule_month();
+            }
+            Err(error) => {
+                self.redo_stack.push(entry);
+                self.set_error(error);
+            }
         }
     }
 
@@ -1836,8 +1927,27 @@ impl MnemaGuiApp {
                 self.refresh_schedule_month();
             }
             MenuAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            MenuAction::Undo => self.undo_status_change(),
+            MenuAction::Redo => self.redo_status_change(),
             MenuAction::SetView(view) => self.view = view,
             MenuAction::SetDarkMode(dark_mode) => self.dark_mode = dark_mode,
+        }
+    }
+
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+
+        let redo = egui::KeyboardShortcut::new(
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Key::Z,
+        );
+        let undo = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Z);
+        if ctx.input_mut(|input| input.consume_shortcut(&redo)) {
+            self.redo_status_change();
+        } else if ctx.input_mut(|input| input.consume_shortcut(&undo)) {
+            self.undo_status_change();
         }
     }
 
@@ -1856,6 +1966,7 @@ impl MnemaGuiApp {
 impl eframe::App for MnemaGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_native_menu(ui.ctx());
+        self.handle_keyboard_shortcuts(ui.ctx());
 
         let dark_factor = ui.ctx().animate_bool_with_time(
             egui::Id::new("mnema_theme_transition"),
@@ -1952,7 +2063,6 @@ impl MnemaGuiApp {
         section_header(ui, "Home", palette);
         let mut task_action = None;
         let mut plan = false;
-        let mut save_plan = false;
         let mut confirm_replace_plan = false;
         let mut cancel_plan_save = false;
         let mut repair_from_now = false;
@@ -1988,9 +2098,6 @@ impl MnemaGuiApp {
                 }
                 if ui.button("Plan").clicked() {
                     plan = true;
-                }
-                if self.plan.is_some() && ui.button("Save plan").clicked() {
-                    save_plan = true;
                 }
             });
 
@@ -2032,9 +2139,6 @@ impl MnemaGuiApp {
             self.refresh_schedule();
         }
         if plan {
-            self.plan_today(false);
-        }
-        if save_plan {
             self.request_save_plan();
         }
         if confirm_replace_plan {
@@ -3274,13 +3378,13 @@ fn task_status_button(
     );
 
     let center = rect.center();
-    let outer_radius = if response.hovered() { 11.0 } else { 10.0 };
+    let outer_radius = if response.hovered() { 9.5 } else { 8.5 };
     ui.painter().circle_stroke(
         center,
         outer_radius,
         Stroke::new(if response.hovered() { 1.8 } else { 1.3 }, status_color),
     );
-    ui.painter().circle_filled(center, 4.5, status_color);
+    ui.painter().circle_filled(center, 3.8, status_color);
 
     egui::Popup::menu(&response)
         .id(popup_id)
@@ -4692,8 +4796,20 @@ fn asks_next_action(value: &str) -> bool {
 }
 
 fn default_workday_availability(date: Date) -> Result<Vec<mnema_app::AvailabilityWindow>> {
-    let start = date.with_hms(9, 0, 0)?.assume_utc();
+    let today = OffsetDateTime::now_utc().date();
+    if date < today {
+        return Ok(Vec::new());
+    }
+
+    let mut start = date.with_hms(9, 0, 0)?.assume_utc();
     let end = date.with_hms(17, 0, 0)?.assume_utc();
+    if date == today {
+        start = start.max(OffsetDateTime::now_utc());
+    }
+    if start >= end {
+        return Ok(Vec::new());
+    }
+
     Ok(vec![mnema_app::AvailabilityWindow {
         window: mnema_app::TimeWindow::new(start, end),
     }])

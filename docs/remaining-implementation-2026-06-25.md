@@ -12,7 +12,9 @@
 - Inbox からタスクを追加できる。
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
 - タスク一覧でステータス変更、期限・見積の行内編集、編集、削除ができる。
-- Home で plan を生成し、ScheduleBlock として保存できる。
+- タスク一覧のステータス変更は `Ctrl+Z` / `Ctrl+Shift+Z` で undo / redo できる。
+- Home で plan を生成し、ScheduleBlock として自動保存できる。
+- Home の plan は過去日や当日の現在時刻以前には配置しない。
 - Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block を再提案できる。
 - Schedule は日別タイムラインとして表示できる。
 - Schedule は月間 Calendar 表示へ切り替えられる。
