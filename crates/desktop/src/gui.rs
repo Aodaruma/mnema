@@ -59,6 +59,12 @@ enum ScheduleViewMode {
     Calendar,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectViewMode {
+    Details,
+    Gantt,
+}
+
 #[derive(Debug, Clone)]
 enum TaskAction {
     Edit(TaskId),
@@ -421,6 +427,7 @@ struct MnemaGuiApp {
     project_list_name: String,
     milestone_title: String,
     milestone_target_date: String,
+    project_view_mode: ProjectViewMode,
     plan: Option<PlanTodayResult>,
     schedule: Vec<ScheduleBlock>,
     schedule_month: Vec<ScheduleBlock>,
@@ -500,6 +507,7 @@ impl MnemaGuiApp {
             project_list_name: String::new(),
             milestone_title: String::new(),
             milestone_target_date: today.clone(),
+            project_view_mode: ProjectViewMode::Details,
             plan: None,
             schedule: Vec::new(),
             schedule_month: Vec::new(),
@@ -1895,6 +1903,15 @@ impl MnemaGuiApp {
     fn show_projects(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Projects", palette);
         ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.project_view_mode,
+                ProjectViewMode::Details,
+                "Details",
+            );
+            ui.selectable_value(&mut self.project_view_mode, ProjectViewMode::Gantt, "Gantt");
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
             ui.add_sized(
                 [260.0, INPUT_HEIGHT],
                 text_field(&mut self.project_title, "Project title"),
@@ -1908,6 +1925,20 @@ impl MnemaGuiApp {
             }
         });
         ui.add_space(12.0);
+
+        if self.project_view_mode == ProjectViewMode::Gantt {
+            if let Some(project_id) = project_gantt_view(
+                ui,
+                &self.projects,
+                self.selected_project_id.as_ref(),
+                &self.milestones,
+                palette,
+            ) {
+                self.selected_project_id = Some(project_id);
+                self.refresh_project_children();
+            }
+            return;
+        }
 
         let mut select_project = None;
         ui.columns(2, |columns| {
@@ -2856,6 +2887,302 @@ fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
     });
 }
 
+fn project_gantt_view(
+    ui: &mut egui::Ui,
+    projects: &[Project],
+    selected_project_id: Option<&ProjectId>,
+    selected_milestones: &[Milestone],
+    palette: Palette,
+) -> Option<ProjectId> {
+    if projects.is_empty() {
+        ui.label("No projects.");
+        return None;
+    }
+
+    let Some((range_start, range_end)) = project_gantt_range(projects, selected_milestones) else {
+        ui.label("No dated projects.");
+        return None;
+    };
+
+    let total_days = (days_between(range_start, range_end) + 1).max(1) as f32;
+    let timeline_width = (total_days * 24.0).clamp(560.0, 2200.0);
+    let label_width = 220.0;
+    let row_height = 44.0;
+    let mut selected = None;
+
+    ui.horizontal(|ui| {
+        ui.label(regular_text(format!("{} - {}", range_start, range_end)).color(palette.muted));
+        ui.label(regular_text(format!("{} projects", projects.len())).color(palette.muted));
+    });
+    ui.add_space(8.0);
+
+    ScrollArea::both().max_height(560.0).show(ui, |ui| {
+        draw_gantt_axis(
+            ui,
+            range_start,
+            range_end,
+            label_width,
+            timeline_width,
+            palette,
+        );
+        ui.add_space(4.0);
+
+        for project in projects {
+            ui.horizontal(|ui| {
+                let is_selected = selected_project_id == Some(&project.id);
+                if ui
+                    .add_sized(
+                        [label_width, 32.0],
+                        egui::Button::selectable(is_selected, project.title.as_str()),
+                    )
+                    .clicked()
+                {
+                    selected = Some(project.id.clone());
+                }
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(timeline_width, row_height),
+                    egui::Sense::click(),
+                );
+                draw_gantt_project_row(
+                    ui.painter(),
+                    rect,
+                    project,
+                    if is_selected {
+                        selected_milestones
+                    } else {
+                        &[]
+                    },
+                    range_start,
+                    range_end,
+                    is_selected,
+                    palette,
+                );
+                if response.clicked() {
+                    selected = Some(project.id.clone());
+                }
+            });
+            ui.add_space(5.0);
+        }
+    });
+
+    selected
+}
+
+fn draw_gantt_axis(
+    ui: &mut egui::Ui,
+    range_start: Date,
+    range_end: Date,
+    label_width: f32,
+    timeline_width: f32,
+    palette: Palette,
+) {
+    ui.horizontal(|ui| {
+        ui.add_sized([label_width, 24.0], egui::Label::new(""));
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(timeline_width, 24.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            Stroke::new(1.0, palette.border),
+        );
+
+        let mut cursor = range_start;
+        let mut last_month = None;
+        while cursor <= range_end {
+            let is_month_start = last_month != Some((cursor.year(), cursor.month()));
+            let is_week_start = cursor.weekday().number_days_from_monday() == 0;
+            if is_month_start || is_week_start {
+                let x = gantt_x_for_date(rect, range_start, range_end, cursor);
+                let color = if is_month_start {
+                    palette.accent
+                } else {
+                    palette.border
+                };
+                painter.line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    Stroke::new(1.0, color),
+                );
+                if is_month_start {
+                    painter.text(
+                        egui::pos2(x + 4.0, rect.top() + 2.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{} {}", month_label(cursor.month()), cursor.year()),
+                        egui::FontId::proportional(12.0),
+                        palette.muted,
+                    );
+                }
+            }
+            last_month = Some((cursor.year(), cursor.month()));
+            let Some(next_day) = cursor.next_day() else {
+                break;
+            };
+            cursor = next_day;
+        }
+    });
+}
+
+fn draw_gantt_project_row(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    project: &Project,
+    milestones: &[Milestone],
+    range_start: Date,
+    range_end: Date,
+    selected: bool,
+    palette: Palette,
+) {
+    painter.rect(
+        rect,
+        6.0,
+        if selected {
+            palette.selected_fill
+        } else {
+            palette.surface
+        },
+        Stroke::new(
+            1.0,
+            if selected {
+                palette.accent
+            } else {
+                palette.border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    draw_gantt_grid(painter, rect, range_start, range_end, palette);
+
+    if let Some((start, end)) = project_gantt_span(project) {
+        let start = start.max(range_start);
+        let end = end.min(range_end);
+        let left = gantt_x_for_date(rect, range_start, range_end, start);
+        let right = gantt_x_for_date(rect, range_start, range_end, end.next_day().unwrap_or(end));
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(left, rect.center().y - 8.0),
+            egui::pos2(right.max(left + 8.0), rect.center().y + 8.0),
+        );
+        painter.rect(
+            bar_rect,
+            8.0,
+            if selected {
+                palette.accent
+            } else {
+                palette.control_active
+            },
+            Stroke::new(1.0, palette.border_strong),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        painter.text(
+            rect.left_center() + egui::vec2(10.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "No project dates",
+            egui::FontId::proportional(12.0),
+            palette.muted,
+        );
+    }
+
+    for milestone in milestones {
+        if milestone.target_date < range_start || milestone.target_date > range_end {
+            continue;
+        }
+        let x = gantt_x_for_date(rect, range_start, range_end, milestone.target_date);
+        let center = egui::pos2(x, rect.center().y);
+        painter.circle_filled(
+            center,
+            5.0,
+            milestone_status_color(&milestone.status, palette),
+        );
+        painter.text(
+            center + egui::vec2(7.0, -16.0),
+            egui::Align2::LEFT_TOP,
+            truncate_chars(&milestone.title, 24),
+            egui::FontId::proportional(12.0),
+            palette.text,
+        );
+    }
+}
+
+fn draw_gantt_grid(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    range_start: Date,
+    range_end: Date,
+    palette: Palette,
+) {
+    let mut cursor = range_start;
+    while cursor <= range_end {
+        if cursor.weekday().number_days_from_monday() == 0 {
+            let x = gantt_x_for_date(rect, range_start, range_end, cursor);
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                Stroke::new(1.0, palette.faint),
+            );
+        }
+        let Some(next_day) = cursor.next_day() else {
+            break;
+        };
+        cursor = next_day;
+    }
+
+    let today = OffsetDateTime::now_utc().date();
+    if today >= range_start && today <= range_end {
+        let x = gantt_x_for_date(rect, range_start, range_end, today);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.5, palette.warning),
+        );
+    }
+}
+
+fn project_gantt_range(
+    projects: &[Project],
+    selected_milestones: &[Milestone],
+) -> Option<(Date, Date)> {
+    let mut start = None::<Date>;
+    let mut end = None::<Date>;
+
+    for project in projects {
+        if let Some((project_start, project_end)) = project_gantt_span(project) {
+            start = Some(start.map_or(project_start, |value| value.min(project_start)));
+            end = Some(end.map_or(project_end, |value| value.max(project_end)));
+        }
+    }
+
+    for milestone in selected_milestones {
+        start = Some(start.map_or(milestone.target_date, |value| {
+            value.min(milestone.target_date)
+        }));
+        end = Some(end.map_or(milestone.target_date, |value| {
+            value.max(milestone.target_date)
+        }));
+    }
+
+    let start = start?;
+    let end = end.unwrap_or(start);
+    Some((
+        add_days(start, -3).unwrap_or(start),
+        add_days(end.max(start), 7).unwrap_or(end.max(start)),
+    ))
+}
+
+fn project_gantt_span(project: &Project) -> Option<(Date, Date)> {
+    let start = project.start_date.or(project.end_date)?;
+    let end = project.end_date.or(project.start_date).unwrap_or(start);
+    Some(if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    })
+}
+
+fn gantt_x_for_date(rect: egui::Rect, range_start: Date, range_end: Date, date: Date) -> f32 {
+    let total_days = (days_between(range_start, range_end) + 1).max(1) as f32;
+    let day_index = days_between(range_start, date).clamp(0, total_days as i64) as f32;
+    rect.left() + rect.width() * (day_index / total_days)
+}
+
 fn schedule_calendar_view(
     ui: &mut egui::Ui,
     target_date: Date,
@@ -3313,6 +3640,39 @@ fn days_in_month(year: i32, month: Month) -> Result<u8> {
         .day())
 }
 
+fn add_days(date: Date, days: i32) -> Option<Date> {
+    let mut result = date;
+    for _ in 0..days.unsigned_abs() {
+        result = if days < 0 {
+            result.previous_day()?
+        } else {
+            result.next_day()?
+        };
+    }
+    Some(result)
+}
+
+fn days_between(start: Date, end: Date) -> i64 {
+    if start == end {
+        return 0;
+    }
+
+    if start > end {
+        return -days_between(end, start);
+    }
+
+    let mut current = start;
+    let mut days = 0;
+    while current < end {
+        let Some(next_day) = current.next_day() else {
+            break;
+        };
+        current = next_day;
+        days += 1;
+    }
+    days
+}
+
 fn month_label(month: Month) -> &'static str {
     match month {
         Month::January => "January",
@@ -3562,6 +3922,14 @@ fn milestone_status_label(status: &MilestoneStatus) -> &'static str {
         MilestoneStatus::NotDone => "not done",
         MilestoneStatus::Overdue => "overdue",
         MilestoneStatus::Done => "done",
+    }
+}
+
+fn milestone_status_color(status: &MilestoneStatus, palette: Palette) -> Color32 {
+    match status {
+        MilestoneStatus::NotDone => palette.accent,
+        MilestoneStatus::Overdue => palette.warning,
+        MilestoneStatus::Done => palette.success,
     }
 }
 
