@@ -3,14 +3,14 @@
 use std::collections::{HashMap, HashSet};
 
 use mnema_core::prelude::*;
-use mnema_scheduler::{ScheduleIssue, SchedulingOutput};
+use mnema_scheduler::SchedulingOutput;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
 
 pub use mnema_scheduler::{
     AvailabilityWindow, BusyBlock, BusyBlockSource, GreedyScheduler, ProposedScheduleBlock,
-    SchedulerConfig, SchedulingInput, TimeWindow,
+    ScheduleIssue, SchedulerConfig, SchedulingInput, TimeWindow,
 };
 
 #[derive(Debug, Error)]
@@ -195,21 +195,13 @@ impl<'a> PlanTodayService<'a> {
         let status_groups = self.statuses.list_groups().await?;
         let statuses = statuses_for_tasks(self.statuses, &tasks).await?;
 
-        let output = if request.availability.is_empty() {
-            SchedulingOutput {
-                blocks: Vec::new(),
-                unscheduled: tasks.into_iter().map(|task| task.id).collect(),
-                issues: vec![ScheduleIssue::NoAvailability],
-            }
-        } else {
-            self.scheduler.plan(SchedulingInput {
-                tasks,
-                statuses,
-                status_groups,
-                availability: request.availability,
-                busy_blocks: request.busy_blocks,
-            })
-        };
+        let output = self.scheduler.plan(SchedulingInput {
+            tasks,
+            statuses,
+            status_groups,
+            availability: request.availability,
+            busy_blocks: request.busy_blocks,
+        });
 
         Ok(PlanTodayResult {
             target_date: request.target_date,
@@ -284,21 +276,13 @@ impl<'a> RepairScheduleService<'a> {
         let status_groups = self.statuses.list_groups().await?;
         let statuses = statuses_for_tasks(self.statuses, &tasks).await?;
 
-        let output = if availability.is_empty() {
-            SchedulingOutput {
-                blocks: Vec::new(),
-                unscheduled: tasks.into_iter().map(|task| task.id).collect(),
-                issues: vec![ScheduleIssue::NoAvailability],
-            }
-        } else {
-            self.scheduler.plan(SchedulingInput {
-                tasks,
-                statuses,
-                status_groups,
-                availability,
-                busy_blocks,
-            })
-        };
+        let output = self.scheduler.plan(SchedulingInput {
+            tasks,
+            statuses,
+            status_groups,
+            availability,
+            busy_blocks,
+        });
 
         Ok(RepairScheduleResult {
             target_date: request.target_date,

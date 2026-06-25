@@ -101,11 +101,16 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 - status button: 二重丸をクリックして status を選ぶ。メニューは status 名だけを表示し、Done 系 status を選ぶと完了扱いになる。
 - status undo / redo: status 変更は `Ctrl+Z` で undo、`Ctrl+Shift+Z` で redo できる。
 - due / estimate: クリックするとその場で背景なしの入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
+- due: 通常入力時は近辺の日付セレクターを表示し、`today`、`tomorrow`、`tue` など英語入力中は候補リストに切り替える。`YYYY-MM-DD`、`YYYYMMDD`、`YYYY/MM/DD` も解釈する。
+- estimate: `30m`、`1h30m`、`01:30`、`01:30:00`、分数を解釈する。固定値と加算ボタンからも更新できる。
+- Done toggle: 左パネル下部で完了済みタスクを表示できる。直近10件から表示し、必要に応じて追加読み込みする。
 - edit / delete icon: Material Icons を使う。ホバー時に明るくなり、delete は確認後に実行する。
 - Agenda date: 右パネル上部で対象日を切り替える。
 - Today: すでに当日が表示されている状態でクリックすると、agenda の現在時刻ラインへスクロールする。
 - Plan: 対象日のタスクから agenda に予定案を作り、proposed ScheduleBlock として保存する。既存 proposed block がある場合は置き換え確認を出す。
+- Repair: Plan の横にあるボタン。現在時刻以降を再提案し、結果を自動保存する。
 - Repair icon: 現在時刻ライン右端のアイコン。hover で強調され、クリックすると現在時刻以降を repair する。
+- Schedule result: proposed / unscheduled / issue 件数に加え、issue の内容を短いメッセージとして表示する。
 
 この画面に置かないもの:
 
@@ -116,7 +121,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 現状の制限:
 
 - availability は現時点では既定の 9:00-17:00 を使う。ただし過去日には計画せず、当日は現在時刻以降だけを対象にする。
-- Repair は agenda 上に再提案を出す。差分レビュー UI はまだない。
+- Repair は現在時刻以降の proposed block を置き換える。差分レビュー UI はまだない。
 - 外部カレンダー予定はまだ取り込んでいない。
 
 ## Schedule

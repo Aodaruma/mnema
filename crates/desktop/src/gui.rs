@@ -1,7 +1,7 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::{cmp::Reverse, collections::HashSet};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{
@@ -11,7 +11,7 @@ use eframe::egui::{
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
     ProposedScheduleBlock, RepairScheduleRequest, RepairScheduleService,
-    ScheduleBlockCommandService, SchedulePlanStoreService, TaskCommandService,
+    ScheduleBlockCommandService, ScheduleIssue, SchedulePlanStoreService, TaskCommandService,
     UpdateScheduleBlockWindowRequest, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
@@ -21,7 +21,7 @@ use mnema_infra::{
 };
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
-use time::{Date, Month, OffsetDateTime, Time, macros::format_description};
+use time::{Date, Month, OffsetDateTime, Time, Weekday, macros::format_description};
 use tokio::runtime::Runtime;
 
 static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
@@ -471,6 +471,9 @@ struct MnemaGuiApp {
     repair_from_time: String,
     schedule_view_mode: ScheduleViewMode,
     tasks: Vec<Task>,
+    done_tasks: Vec<Task>,
+    show_done_tasks: bool,
+    done_task_limit: usize,
     lists: Vec<List>,
     statuses: Vec<Status>,
     status_groups: Vec<StatusGroup>,
@@ -558,6 +561,9 @@ impl MnemaGuiApp {
             repair_from_time: current_time,
             schedule_view_mode: ScheduleViewMode::Day,
             tasks: Vec::new(),
+            done_tasks: Vec::new(),
+            show_done_tasks: false,
+            done_task_limit: 10,
             lists: Vec::new(),
             statuses: Vec::new(),
             status_groups: Vec::new(),
@@ -638,16 +644,29 @@ impl MnemaGuiApp {
             let status_repo = vault.status_repo();
             let mut tasks = task_repo.list_all().await?;
             let done_status_ids = done_status_ids(status_repo.as_ref(), &tasks).await?;
-            tasks.retain(|task| {
-                task.deleted_at.is_none() && !done_status_ids.contains(&task.status_id)
-            });
-            tasks.sort_by_key(|task| (task.due_date, task.created_at));
-            Result::<Vec<Task>>::Ok(tasks)
+            tasks.retain(|task| task.deleted_at.is_none());
+
+            let mut active_tasks = Vec::new();
+            let mut done_tasks = Vec::new();
+            for task in tasks {
+                if done_status_ids.contains(&task.status_id) {
+                    done_tasks.push(task);
+                } else {
+                    active_tasks.push(task);
+                }
+            }
+            active_tasks.sort_by_key(|task| (task.due_date, task.created_at));
+            done_tasks.sort_by_key(|task| Reverse(task.updated_at));
+            Result::<(Vec<Task>, Vec<Task>)>::Ok((active_tasks, done_tasks))
         });
 
         match result {
-            Ok(tasks) => {
+            Ok((tasks, done_tasks)) => {
                 self.tasks = tasks;
+                self.done_tasks = done_tasks;
+                self.done_task_limit = self
+                    .done_task_limit
+                    .clamp(10, self.done_tasks.len().max(10));
                 self.error = None;
             }
             Err(error) => self.set_error(error),
@@ -2082,6 +2101,16 @@ impl MnemaGuiApp {
                 &self.projects,
                 self.confirming_delete_task_id.as_ref(),
                 &mut self.inline_task_edit,
+                Some(360.0),
+                palette,
+            );
+            done_task_section(
+                &mut columns[0],
+                &self.done_tasks,
+                &self.lists,
+                &self.projects,
+                &mut self.show_done_tasks,
+                &mut self.done_task_limit,
                 palette,
             );
             self.show_task_editor(&mut columns[0], palette);
@@ -2098,6 +2127,9 @@ impl MnemaGuiApp {
                 }
                 if ui.button("Plan").clicked() {
                     plan = true;
+                }
+                if ui.button("Repair").clicked() {
+                    repair_from_now = true;
                 }
             });
 
@@ -2151,7 +2183,7 @@ impl MnemaGuiApp {
         }
         if repair_from_now {
             self.repair_from_time = format_hm(OffsetDateTime::now_utc());
-            self.repair_schedule(false);
+            self.repair_schedule(true);
         }
     }
 
@@ -2194,6 +2226,7 @@ impl MnemaGuiApp {
             &self.projects,
             self.confirming_delete_task_id.as_ref(),
             &mut self.inline_task_edit,
+            None,
             palette,
         ) {
             self.handle_task_action(action);
@@ -3251,6 +3284,7 @@ fn task_list(
     projects: &[Project],
     confirming_delete_task_id: Option<&TaskId>,
     inline_task_edit: &mut Option<TaskInlineEdit>,
+    max_height: Option<f32>,
     palette: Palette,
 ) -> Option<TaskAction> {
     if tasks.is_empty() {
@@ -3259,97 +3293,164 @@ fn task_list(
     }
 
     let mut action = None;
-    ScrollArea::vertical()
+    let mut scroll_area = ScrollArea::vertical()
         .id_salt(id_salt)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for task in tasks {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 62.0),
-                    egui::Layout::left_to_right(Align::Center),
-                    |ui| {
-                        task_status_button(
-                            ui,
-                            id_salt,
-                            task,
-                            statuses,
-                            status_groups,
-                            palette,
-                            &mut action,
+        .auto_shrink([false, false]);
+    if let Some(max_height) = max_height {
+        scroll_area = scroll_area.max_height(max_height);
+    }
+    scroll_area.show(ui, |ui| {
+        for task in tasks {
+            let is_inline_editing = inline_task_edit
+                .as_ref()
+                .is_some_and(|edit| edit.task_id == task.id);
+            let row_height = match inline_task_edit.as_ref() {
+                Some(edit) if edit.task_id == task.id && edit.field == TaskInlineField::DueDate => {
+                    132.0
+                }
+                Some(edit)
+                    if edit.task_id == task.id
+                        && edit.field == TaskInlineField::EstimateMinutes =>
+                {
+                    112.0
+                }
+                _ if is_inline_editing => 116.0,
+                _ => 62.0,
+            };
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Layout::left_to_right(Align::Center),
+                |ui| {
+                    task_status_button(
+                        ui,
+                        id_salt,
+                        task,
+                        statuses,
+                        status_groups,
+                        palette,
+                        &mut action,
+                    );
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            regular_text(task_context_line(task, lists, projects))
+                                .size(11.0)
+                                .color(palette.muted),
                         );
-                        ui.add_space(6.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                regular_text(task_context_line(task, lists, projects))
-                                    .size(11.0)
-                                    .color(palette.muted),
+                        ui.label(bold_text(task.title.as_str()).color(palette.text));
+                        ui.horizontal(|ui| {
+                            inline_task_meta(
+                                ui,
+                                id_salt,
+                                task,
+                                TaskInlineField::DueDate,
+                                task.due_date
+                                    .map(|date| format!("due {date}"))
+                                    .unwrap_or_else(|| "due none".to_string()),
+                                task.due_date
+                                    .map(|date| date.to_string())
+                                    .unwrap_or_default(),
+                                92.0,
+                                palette.due,
+                                palette,
+                                inline_task_edit,
+                                &mut action,
                             );
-                            ui.label(bold_text(task.title.as_str()).color(palette.text));
-                            ui.horizontal(|ui| {
-                                inline_task_meta(
-                                    ui,
-                                    id_salt,
-                                    task,
-                                    TaskInlineField::DueDate,
-                                    task.due_date
-                                        .map(|date| format!("due {date}"))
-                                        .unwrap_or_else(|| "due none".to_string()),
-                                    task.due_date
-                                        .map(|date| date.to_string())
-                                        .unwrap_or_default(),
-                                    92.0,
-                                    palette.due,
-                                    inline_task_edit,
-                                    &mut action,
-                                );
-                                inline_task_meta(
-                                    ui,
-                                    id_salt,
-                                    task,
-                                    TaskInlineField::EstimateMinutes,
-                                    task.estimated_minutes
-                                        .map(|minutes| format!("{minutes} min"))
-                                        .unwrap_or_else(|| "estimate none".to_string()),
-                                    task.estimated_minutes
-                                        .map(|minutes| minutes.to_string())
-                                        .unwrap_or_default(),
-                                    82.0,
-                                    palette.muted,
-                                    inline_task_edit,
-                                    &mut action,
-                                );
-                            });
+                            inline_task_meta(
+                                ui,
+                                id_salt,
+                                task,
+                                TaskInlineField::EstimateMinutes,
+                                task.estimated_minutes
+                                    .map(|minutes| format!("{minutes} min"))
+                                    .unwrap_or_else(|| "estimate none".to_string()),
+                                task.estimated_minutes
+                                    .map(|minutes| minutes.to_string())
+                                    .unwrap_or_default(),
+                                82.0,
+                                palette.muted,
+                                palette,
+                                inline_task_edit,
+                                &mut action,
+                            );
                         });
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            let confirming = confirming_delete_task_id == Some(&task.id);
-                            if confirming {
-                                if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
-                                    .clicked()
-                                {
-                                    action = Some(TaskAction::ConfirmDelete(task.id.clone()));
-                                }
-                                if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
-                                    .clicked()
-                                {
-                                    action = Some(TaskAction::CancelDelete);
-                                }
-                                ui.label(regular_text("Delete?").color(palette.warning));
-                            } else {
-                                if subtle_icon_button(ui, ICON_DELETE, "Delete", palette).clicked()
-                                {
-                                    action = Some(TaskAction::RequestDelete(task.id.clone()));
-                                }
-                                if subtle_icon_button(ui, ICON_EDIT, "Edit", palette).clicked() {
-                                    action = Some(TaskAction::Edit(task.id.clone()));
-                                }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let confirming = confirming_delete_task_id == Some(&task.id);
+                        if confirming {
+                            if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
+                                .clicked()
+                            {
+                                action = Some(TaskAction::ConfirmDelete(task.id.clone()));
                             }
-                        });
-                    },
-                );
-                ui.separator();
-            }
-        });
+                            if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
+                                .clicked()
+                            {
+                                action = Some(TaskAction::CancelDelete);
+                            }
+                            ui.label(regular_text("Delete?").color(palette.warning));
+                        } else {
+                            if subtle_icon_button(ui, ICON_DELETE, "Delete", palette).clicked() {
+                                action = Some(TaskAction::RequestDelete(task.id.clone()));
+                            }
+                            if subtle_icon_button(ui, ICON_EDIT, "Edit", palette).clicked() {
+                                action = Some(TaskAction::Edit(task.id.clone()));
+                            }
+                        }
+                    });
+                },
+            );
+            ui.separator();
+        }
+    });
     action
+}
+
+fn done_task_section(
+    ui: &mut egui::Ui,
+    done_tasks: &[Task],
+    lists: &[List],
+    projects: &[Project],
+    show_done_tasks: &mut bool,
+    done_task_limit: &mut usize,
+    palette: Palette,
+) {
+    if done_tasks.is_empty() {
+        return;
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.checkbox(show_done_tasks, "");
+        ui.label(bold_text(format!("Done ({})", done_tasks.len())).color(palette.muted));
+    });
+    if !*show_done_tasks {
+        return;
+    }
+
+    let visible_count = (*done_task_limit).min(done_tasks.len());
+    for task in done_tasks.iter().take(visible_count) {
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    regular_text(task.title.as_str())
+                        .size(12.0)
+                        .color(palette.muted),
+                );
+                ui.label(
+                    regular_text(task_context_line(task, lists, projects))
+                        .size(10.0)
+                        .color(palette.muted),
+                );
+            });
+        });
+    }
+
+    if visible_count < done_tasks.len() && ui.button("Load more done").clicked() {
+        *done_task_limit = (*done_task_limit + 10).min(done_tasks.len());
+    }
 }
 
 fn task_status_button(
@@ -3411,6 +3512,7 @@ fn inline_task_meta(
     edit_value: String,
     width: f32,
     color: Color32,
+    palette: Palette,
     inline_task_edit: &mut Option<TaskInlineEdit>,
     action: &mut Option<TaskAction>,
 ) {
@@ -3422,31 +3524,44 @@ fn inline_task_meta(
         let Some(edit) = inline_task_edit.as_mut() else {
             return;
         };
-        let response = ui.add_sized(
-            [width, 20.0],
-            inline_text_field(&mut edit.value, width).id(ui.make_persistent_id((
-                id_salt,
-                "inline",
-                task.id.clone(),
-                field,
-            ))),
-        );
-        if edit.focus {
-            response.request_focus();
-            edit.focus = false;
-        }
+        ui.vertical(|ui| {
+            let response = ui.add_sized(
+                [width, 20.0],
+                inline_text_field(&mut edit.value, width).id(ui.make_persistent_id((
+                    id_salt,
+                    "inline",
+                    task.id.clone(),
+                    field,
+                ))),
+            );
+            if edit.focus {
+                response.request_focus();
+                edit.focus = false;
+            }
 
-        let enter = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let escape = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
-        if escape {
-            *action = Some(TaskAction::CancelInlineEdit);
-        } else if enter || response.lost_focus() {
-            *action = Some(TaskAction::SaveInlineField(
-                task.id.clone(),
-                field,
-                edit.value.clone(),
-            ));
-        }
+            let selected = match field {
+                TaskInlineField::DueDate => {
+                    due_date_inline_options(ui, task, &mut edit.value, action, palette)
+                }
+                TaskInlineField::EstimateMinutes => {
+                    estimate_inline_options(ui, task, &mut edit.value, action, palette)
+                }
+            };
+
+            let enter =
+                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let escape =
+                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if escape {
+                *action = Some(TaskAction::CancelInlineEdit);
+            } else if !selected && (enter || response.lost_focus()) {
+                *action = Some(TaskAction::SaveInlineField(
+                    task.id.clone(),
+                    field,
+                    edit.value.clone(),
+                ));
+            }
+        });
     } else {
         let response = ui
             .add(
@@ -3463,6 +3578,91 @@ fn inline_task_meta(
             });
         }
     }
+}
+
+fn due_date_inline_options(
+    ui: &mut egui::Ui,
+    task: &Task,
+    value: &mut String,
+    action: &mut Option<TaskAction>,
+    palette: Palette,
+) -> bool {
+    if is_textual_date_query(value) {
+        ui.label(regular_text("Suggestions").size(10.0).color(palette.muted));
+    } else {
+        ui.label(
+            regular_text("Date selector")
+                .size(10.0)
+                .color(palette.muted),
+        );
+    }
+    let candidates = due_date_candidates(value);
+    let mut selected = false;
+    for row in candidates.chunks(3) {
+        ui.horizontal(|ui| {
+            for candidate in row {
+                if inline_choice(ui, candidate.label.as_str(), palette).clicked() {
+                    *value = candidate.value.clone();
+                    *action = Some(TaskAction::SaveInlineField(
+                        task.id.clone(),
+                        TaskInlineField::DueDate,
+                        value.clone(),
+                    ));
+                    selected = true;
+                }
+            }
+        });
+    }
+    selected
+}
+
+fn estimate_inline_options(
+    ui: &mut egui::Ui,
+    task: &Task,
+    value: &mut String,
+    action: &mut Option<TaskAction>,
+    palette: Palette,
+) -> bool {
+    let mut selected = false;
+    ui.horizontal(|ui| {
+        for (label, minutes) in [("30m", 30_u32), ("1h", 60), ("2h", 120)] {
+            if inline_choice(ui, label, palette).clicked() {
+                *value = minutes.to_string();
+                *action = Some(TaskAction::SaveInlineField(
+                    task.id.clone(),
+                    TaskInlineField::EstimateMinutes,
+                    value.clone(),
+                ));
+                selected = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let base = parse_optional_u32(value)
+            .ok()
+            .flatten()
+            .or(task.estimated_minutes)
+            .unwrap_or(0);
+        for (label, minutes) in [("+10m", 10_u32), ("+30m", 30), ("+1h", 60)] {
+            if inline_choice(ui, label, palette).clicked() {
+                *value = base.saturating_add(minutes).to_string();
+                *action = Some(TaskAction::SaveInlineField(
+                    task.id.clone(),
+                    TaskInlineField::EstimateMinutes,
+                    value.clone(),
+                ));
+                selected = true;
+            }
+        }
+    });
+    selected
+}
+
+fn inline_choice(ui: &mut egui::Ui, label: &str, palette: Palette) -> egui::Response {
+    ui.add(
+        egui::Label::new(regular_text(label).size(11.0).color(palette.accent))
+            .sense(egui::Sense::click()),
+    )
 }
 
 fn status_candidates<'a>(
@@ -3578,6 +3778,17 @@ fn home_agenda_view(
                 );
             }
         });
+        if !plan.output.issues.is_empty() {
+            ui.vertical(|ui| {
+                for issue in &plan.output.issues {
+                    ui.label(
+                        regular_text(format!("Issue: {}", schedule_issue_label(issue)))
+                            .size(12.0)
+                            .color(palette.warning),
+                    );
+                }
+            });
+        }
         ui.add_space(6.0);
     }
 
@@ -4648,18 +4859,73 @@ async fn done_status_ids(
     Ok(status_ids)
 }
 
+#[derive(Debug, Clone)]
+struct DateCandidate {
+    label: String,
+    value: String,
+}
+
 fn parse_optional_date(value: &str) -> Result<Option<Date>> {
     let value = value.trim();
     if value.is_empty() {
         Ok(None)
     } else {
-        parse_required_date(value).map(Some)
+        parse_flexible_date(value, OffsetDateTime::now_utc().date()).map(Some)
     }
 }
 
 fn parse_required_date(value: &str) -> Result<Date> {
     Date::parse(value.trim(), format_description!("[year]-[month]-[day]"))
         .map_err(|_| anyhow!("日付は YYYY-MM-DD で入力してください"))
+}
+
+fn parse_flexible_date(value: &str, today: Date) -> Result<Date> {
+    let value = value.trim();
+    if let Ok(date) = parse_required_date(value) {
+        return Ok(date);
+    }
+
+    let normalized = value.to_ascii_lowercase().replace(['/', '.'], "-");
+    if let Ok(date) = Date::parse(&normalized, format_description!("[year]-[month]-[day]")) {
+        return Ok(date);
+    }
+
+    if normalized.len() == 8 && normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        let year = normalized[0..4]
+            .parse::<i32>()
+            .map_err(|_| anyhow!("invalid year"))?;
+        let month = normalized[4..6]
+            .parse::<u8>()
+            .map_err(|_| anyhow!("invalid month"))?;
+        let day = normalized[6..8]
+            .parse::<u8>()
+            .map_err(|_| anyhow!("invalid day"))?;
+        return Date::from_calendar_date(year, Month::try_from(month)?, day)
+            .map_err(|_| anyhow!("日付は YYYY-MM-DD または YYYYMMDD で入力してください"));
+    }
+
+    match normalized.as_str() {
+        "today" => return Ok(today),
+        "tomorrow" | "tmr" | "tmrw" => {
+            return today
+                .next_day()
+                .ok_or_else(|| anyhow!("日付を解釈できません"));
+        }
+        "yesterday" => {
+            return today
+                .previous_day()
+                .ok_or_else(|| anyhow!("日付を解釈できません"));
+        }
+        _ => {}
+    }
+
+    if let Some(weekday) = parse_weekday(&normalized) {
+        return Ok(next_weekday(today, weekday));
+    }
+
+    Err(anyhow!(
+        "日付は YYYY-MM-DD / YYYYMMDD / today / tomorrow / tue などで入力してください"
+    ))
 }
 
 fn parse_hm_for_date(value: &str, date: Date) -> Result<OffsetDateTime> {
@@ -4673,11 +4939,167 @@ fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
     if value.is_empty() {
         Ok(None)
     } else {
-        value
-            .parse::<u32>()
+        parse_duration_minutes(value)
             .map(Some)
-            .map_err(|_| anyhow!("見積分数は数値で入力してください"))
+            .ok_or_else(|| anyhow!("見積時間は 30m / 1h30m / 01:30 / 分数 などで入力してください"))
     }
+}
+
+fn due_date_candidates(input: &str) -> Vec<DateCandidate> {
+    let today = OffsetDateTime::now_utc().date();
+    let query = input.trim().to_ascii_lowercase();
+    if is_textual_date_query(&query) {
+        let mut candidates = Vec::new();
+        let named = [
+            ("today", today),
+            ("tomorrow", today.next_day().unwrap_or(today)),
+        ];
+        for (label, date) in named {
+            if label.starts_with(&query) {
+                candidates.push(date_candidate(label, date));
+            }
+        }
+        for (label, weekday) in weekday_options() {
+            if label.starts_with(&query) {
+                candidates.push(date_candidate(label, next_weekday(today, weekday)));
+            }
+        }
+        return candidates.into_iter().take(6).collect();
+    }
+
+    let anchor = parse_flexible_date(&query, today).unwrap_or(today);
+    let start = add_days(anchor, -3).unwrap_or(anchor);
+    (0..7)
+        .filter_map(|offset| add_days(start, offset))
+        .map(|date| {
+            let label = if date == today {
+                "today"
+            } else if Some(date) == today.next_day() {
+                "tomorrow"
+            } else {
+                weekday_short_label(date.weekday())
+            };
+            date_candidate(label, date)
+        })
+        .collect()
+}
+
+fn is_textual_date_query(value: &str) -> bool {
+    value.trim().chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn date_candidate(label: &str, date: Date) -> DateCandidate {
+    DateCandidate {
+        label: format!("{label} {date}"),
+        value: date.to_string(),
+    }
+}
+
+fn parse_weekday(value: &str) -> Option<Weekday> {
+    weekday_options()
+        .into_iter()
+        .find(|(label, _)| *label == value)
+        .map(|(_, weekday)| weekday)
+}
+
+fn weekday_options() -> [(&'static str, Weekday); 14] {
+    [
+        ("mon", Weekday::Monday),
+        ("monday", Weekday::Monday),
+        ("tue", Weekday::Tuesday),
+        ("tuesday", Weekday::Tuesday),
+        ("wed", Weekday::Wednesday),
+        ("wednesday", Weekday::Wednesday),
+        ("thu", Weekday::Thursday),
+        ("thursday", Weekday::Thursday),
+        ("fri", Weekday::Friday),
+        ("friday", Weekday::Friday),
+        ("sat", Weekday::Saturday),
+        ("saturday", Weekday::Saturday),
+        ("sun", Weekday::Sunday),
+        ("sunday", Weekday::Sunday),
+    ]
+}
+
+fn next_weekday(today: Date, weekday: Weekday) -> Date {
+    let today_index = today.weekday().number_days_from_monday() as i32;
+    let target_index = weekday.number_days_from_monday() as i32;
+    let offset = (target_index - today_index).rem_euclid(7);
+    add_days(today, offset).unwrap_or(today)
+}
+
+fn weekday_short_label(weekday: Weekday) -> &'static str {
+    match weekday {
+        Weekday::Monday => "Mon",
+        Weekday::Tuesday => "Tue",
+        Weekday::Wednesday => "Wed",
+        Weekday::Thursday => "Thu",
+        Weekday::Friday => "Fri",
+        Weekday::Saturday => "Sat",
+        Weekday::Sunday => "Sun",
+    }
+}
+
+fn parse_duration_minutes(value: &str) -> Option<u32> {
+    let normalized = value.trim().to_ascii_lowercase().replace(' ', "");
+    if normalized.is_empty() {
+        return None;
+    }
+    if let Ok(minutes) = normalized.parse::<u32>() {
+        return Some(minutes);
+    }
+    if let Some(minutes) = parse_colon_duration(&normalized) {
+        return Some(minutes);
+    }
+    parse_compact_duration(&normalized).or_else(|| parse_duration_token(&normalized))
+}
+
+fn parse_colon_duration(value: &str) -> Option<u32> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [hours, minutes] => Some(hours.parse::<u32>().ok()? * 60 + minutes.parse::<u32>().ok()?),
+        [hours, minutes, seconds] => {
+            let seconds = seconds.parse::<u32>().ok()?;
+            Some(
+                hours.parse::<u32>().ok()? * 60
+                    + minutes.parse::<u32>().ok()?
+                    + u32::from(seconds > 0),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn parse_compact_duration(value: &str) -> Option<u32> {
+    let mut total = 0_u32;
+    let mut digits = String::new();
+    let mut saw_unit = false;
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.is_empty() {
+            return None;
+        }
+        let amount = digits.parse::<u32>().ok()?;
+        digits.clear();
+        match ch {
+            'h' => {
+                total = total.saturating_add(amount.saturating_mul(60));
+                saw_unit = true;
+            }
+            'm' => {
+                total = total.saturating_add(amount);
+                saw_unit = true;
+            }
+            _ => return None,
+        }
+    }
+    if !digits.is_empty() || !saw_unit {
+        return None;
+    }
+    Some(total.max(1))
 }
 
 fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
@@ -4714,7 +5136,7 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
             let Some(raw_due) = tokens.get(index + 1) else {
                 return Err(anyhow!("期限日を入力してください"));
             };
-            due_date = Some(parse_required_date(raw_due)?);
+            due_date = Some(parse_flexible_date(raw_due, today)?);
             index += 2;
             continue;
         }
@@ -4723,7 +5145,7 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
             .strip_prefix("/due:")
             .or_else(|| normalized.strip_prefix("due:"))
         {
-            due_date = Some(parse_required_date(raw_due)?);
+            due_date = Some(parse_flexible_date(raw_due, today)?);
             index += 1;
             continue;
         }
@@ -4732,16 +5154,14 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
             let Some(raw_minutes) = tokens.get(index + 1) else {
                 return Err(anyhow!("見積分数を入力してください"));
             };
-            estimated_minutes = Some(
-                raw_minutes
-                    .parse::<u32>()
-                    .map_err(|_| anyhow!("見積分数は数値で入力してください"))?,
-            );
+            estimated_minutes = Some(parse_duration_minutes(raw_minutes).ok_or_else(|| {
+                anyhow!("見積時間は 30m / 1h30m / 01:30 / 分数 などで入力してください")
+            })?);
             index += 2;
             continue;
         }
 
-        if let Some(minutes) = parse_duration_token(&normalized) {
+        if let Some(minutes) = parse_duration_minutes(&normalized) {
             estimated_minutes = Some(minutes);
             index += 1;
             continue;
@@ -4832,6 +5252,19 @@ fn schedule_state_label(state: &ScheduleBlockState) -> &'static str {
     }
 }
 
+fn schedule_issue_label(issue: &ScheduleIssue) -> String {
+    match issue {
+        ScheduleIssue::NoAvailability => {
+            "No availability in the remaining planning window".to_string()
+        }
+        ScheduleIssue::TaskUnscheduled {
+            title,
+            required_minutes,
+            ..
+        } => format!("Could not schedule {title} ({required_minutes}m required)"),
+    }
+}
+
 fn list_view_type_label(view_type: &ListViewType) -> &'static str {
     match view_type {
         ListViewType::List => "list",
@@ -4900,5 +5333,36 @@ mod tests {
         assert_eq!(request.title, "Review notes");
         assert_eq!(request.due_date, Some(date!(2026 - 06 - 30)));
         assert_eq!(request.estimated_minutes, Some(90));
+    }
+
+    #[test]
+    fn parses_flexible_dates() {
+        let today = date!(2026 - 06 - 25);
+
+        assert_eq!(
+            parse_flexible_date("20260630", today).unwrap(),
+            date!(2026 - 06 - 30)
+        );
+        assert_eq!(
+            parse_flexible_date("2026/07/01", today).unwrap(),
+            date!(2026 - 07 - 01)
+        );
+        assert_eq!(
+            parse_flexible_date("tomorrow", today).unwrap(),
+            date!(2026 - 06 - 26)
+        );
+        assert_eq!(
+            parse_flexible_date("tue", today).unwrap(),
+            date!(2026 - 06 - 30)
+        );
+    }
+
+    #[test]
+    fn parses_duration_inputs() {
+        assert_eq!(parse_duration_minutes("30m"), Some(30));
+        assert_eq!(parse_duration_minutes("1h30m"), Some(90));
+        assert_eq!(parse_duration_minutes("258m"), Some(258));
+        assert_eq!(parse_duration_minutes("01:30"), Some(90));
+        assert_eq!(parse_duration_minutes("01:30:01"), Some(91));
     }
 }

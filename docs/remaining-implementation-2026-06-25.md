@@ -12,10 +12,14 @@
 - Inbox からタスクを追加できる。
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
 - タスク一覧でステータス変更、期限・見積の行内編集、編集、削除ができる。
+- due date は `YYYY-MM-DD` / `YYYYMMDD` / `today` / `tomorrow` / `tue` などを解釈し、Home では日付セレクターまたは候補リストから選べる。
+- estimate は `30m` / `1h30m` / `01:30` / `01:30:00` / 分数を解釈し、Home では固定値・加算ボタンからも選べる。
 - タスク一覧のステータス変更は `Ctrl+Z` / `Ctrl+Shift+Z` で undo / redo できる。
+- Home では完了済みタスクをトグルで表示でき、直近10件から追加読み込みできる。
 - Home で plan を生成し、ScheduleBlock として自動保存できる。
 - Home の plan は過去日や当日の現在時刻以前には配置しない。
-- Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block を再提案できる。
+- Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block をRepairボタンまたは現在時刻ラインのアイコンから再提案・自動保存できる。
+- Plan / Repair 結果は proposed / unscheduled / issue 件数と issue 内容を表示できる。
 - Schedule は日別タイムラインとして表示できる。
 - Schedule は月間 Calendar 表示へ切り替えられる。
 - Projects は Project Gantt 表示へ切り替えられる。
