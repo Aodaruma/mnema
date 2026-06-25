@@ -97,6 +97,14 @@ impl DesktopStorageBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopLlmProvider {
+    Disabled,
+    Ollama,
+    OpenAiCompatible,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
     vault_path: String,
@@ -104,6 +112,11 @@ struct DesktopConfig {
     sqlite_path: String,
     database_url: String,
     dark_mode: bool,
+    llm_provider: DesktopLlmProvider,
+    ollama_url: String,
+    openai_url: String,
+    planning_model: String,
+    routine_model: String,
 }
 
 impl DesktopConfig {
@@ -114,6 +127,11 @@ impl DesktopConfig {
             sqlite_path: default_sqlite_path().display().to_string(),
             database_url: DEFAULT_POSTGRES_URL.to_string(),
             dark_mode: default_dark_mode,
+            llm_provider: DesktopLlmProvider::Disabled,
+            ollama_url: "http://localhost:11434".to_string(),
+            openai_url: "https://api.openai.com".to_string(),
+            planning_model: "gpt-4.1".to_string(),
+            routine_model: "gpt-4.1-mini".to_string(),
         };
 
         let Ok(bytes) = fs::read(config_path()) else {
@@ -331,8 +349,14 @@ struct MnemaGuiApp {
     selected_backend: DesktopStorageBackend,
     sqlite_path: String,
     database_url: String,
+    llm_provider: DesktopLlmProvider,
+    ollama_url: String,
+    openai_url: String,
+    planning_model: String,
+    routine_model: String,
     view: View,
     task_title: String,
+    quick_capture: String,
     due_date: String,
     minutes: String,
     editing_task_id: Option<TaskId>,
@@ -381,8 +405,14 @@ impl MnemaGuiApp {
             selected_backend: config.storage_backend,
             sqlite_path: config.sqlite_path,
             database_url: config.database_url,
+            llm_provider: config.llm_provider,
+            ollama_url: config.ollama_url,
+            openai_url: config.openai_url,
+            planning_model: config.planning_model,
+            routine_model: config.routine_model,
             view: View::Today,
             task_title: String::new(),
+            quick_capture: String::new(),
             due_date: today.clone(),
             minutes: String::from("45"),
             editing_task_id: None,
@@ -771,6 +801,31 @@ impl MnemaGuiApp {
                 return;
             }
         };
+
+        self.capture_task(CaptureTaskRequest {
+            title,
+            description: None,
+            due_date,
+            estimated_minutes,
+        });
+    }
+
+    fn capture_quick_task(&mut self) {
+        let today = OffsetDateTime::now_utc().date();
+        let request = match parse_quick_capture(&self.quick_capture, today) {
+            Ok(request) => request,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        self.capture_task(request);
+        if self.error.is_none() {
+            self.quick_capture.clear();
+        }
+    }
+
+    fn capture_task(&mut self, request: CaptureTaskRequest) {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
@@ -785,17 +840,7 @@ impl MnemaGuiApp {
                 list_repo.as_ref(),
                 status_repo.as_ref(),
             );
-            Result::<Task>::Ok(
-                service
-                    .capture_inbox_task(CaptureTaskRequest {
-                        title,
-                        description: None,
-                        due_date,
-                        estimated_minutes,
-                    })
-                    .await?
-                    .task,
-            )
+            Result::<Task>::Ok(service.capture_inbox_task(request).await?.task)
         });
 
         match result {
@@ -918,6 +963,11 @@ impl MnemaGuiApp {
             sqlite_path: self.normalized_sqlite_path().display().to_string(),
             database_url: self.normalized_database_url(),
             dark_mode: self.dark_mode,
+            llm_provider: self.llm_provider,
+            ollama_url: self.ollama_url.trim().to_string(),
+            openai_url: self.openai_url.trim().to_string(),
+            planning_model: self.planning_model.trim().to_string(),
+            routine_model: self.routine_model.trim().to_string(),
         };
 
         match save_config(&config) {
@@ -925,6 +975,10 @@ impl MnemaGuiApp {
                 self.vault_path = config.vault_path;
                 self.sqlite_path = config.sqlite_path;
                 self.database_url = config.database_url;
+                self.ollama_url = config.ollama_url;
+                self.openai_url = config.openai_url;
+                self.planning_model = config.planning_model;
+                self.routine_model = config.routine_model;
                 self.settings_message = String::from("Settings saved");
                 self.error = None;
             }
@@ -1122,6 +1176,19 @@ impl MnemaGuiApp {
         section_header(ui, "Inbox", palette);
         ui.horizontal(|ui| {
             ui.add_sized(
+                [560.0, INPUT_HEIGHT],
+                text_field(
+                    &mut self.quick_capture,
+                    "Quick capture: Write proposal tomorrow 45m",
+                ),
+            );
+            if ui.button("Capture").clicked() {
+                self.capture_quick_task();
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_sized(
                 [340.0, INPUT_HEIGHT],
                 text_field(&mut self.task_title, "Task title"),
             );
@@ -1223,6 +1290,46 @@ impl MnemaGuiApp {
                 ui.add_sized(
                     [520.0, INPUT_HEIGHT],
                     text_field(&mut self.database_url, DEFAULT_POSTGRES_URL),
+                );
+                ui.end_row();
+
+                ui.label("LLM provider");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.llm_provider, DesktopLlmProvider::Disabled, "Off");
+                    ui.radio_value(&mut self.llm_provider, DesktopLlmProvider::Ollama, "Ollama");
+                    ui.radio_value(
+                        &mut self.llm_provider,
+                        DesktopLlmProvider::OpenAiCompatible,
+                        "OpenAI compatible",
+                    );
+                });
+                ui.end_row();
+
+                ui.label("Ollama URL");
+                ui.add_sized(
+                    [520.0, INPUT_HEIGHT],
+                    text_field(&mut self.ollama_url, "http://localhost:11434"),
+                );
+                ui.end_row();
+
+                ui.label("OpenAI URL");
+                ui.add_sized(
+                    [520.0, INPUT_HEIGHT],
+                    text_field(&mut self.openai_url, "https://api.openai.com"),
+                );
+                ui.end_row();
+
+                ui.label("Planning model");
+                ui.add_sized(
+                    [260.0, INPUT_HEIGHT],
+                    text_field(&mut self.planning_model, "gpt-4.1"),
+                );
+                ui.end_row();
+
+                ui.label("Routine model");
+                ui.add_sized(
+                    [260.0, INPUT_HEIGHT],
+                    text_field(&mut self.routine_model, "gpt-4.1-mini"),
                 );
                 ui.end_row();
             });
@@ -2088,6 +2195,108 @@ fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
     }
 }
 
+fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("task title is required"));
+    }
+
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let mut title_tokens = Vec::new();
+    let mut due_date = None;
+    let mut estimated_minutes = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token = tokens[index];
+        let normalized = token
+            .trim_matches(|ch: char| ch == ',' || ch == ';')
+            .to_ascii_lowercase();
+
+        if matches!(normalized.as_str(), "today" | "今日") {
+            due_date = Some(today);
+            index += 1;
+            continue;
+        }
+
+        if matches!(normalized.as_str(), "tomorrow" | "明日") {
+            due_date = Some(today.next_day().unwrap_or(today));
+            index += 1;
+            continue;
+        }
+
+        if matches!(normalized.as_str(), "/due" | "due") {
+            let Some(raw_due) = tokens.get(index + 1) else {
+                return Err(anyhow!("due date is missing"));
+            };
+            due_date = Some(parse_required_date(raw_due)?);
+            index += 2;
+            continue;
+        }
+
+        if let Some(raw_due) = normalized
+            .strip_prefix("/due:")
+            .or_else(|| normalized.strip_prefix("due:"))
+        {
+            due_date = Some(parse_required_date(raw_due)?);
+            index += 1;
+            continue;
+        }
+
+        if matches!(normalized.as_str(), "/m" | "/minutes" | "minutes") {
+            let Some(raw_minutes) = tokens.get(index + 1) else {
+                return Err(anyhow!("minutes value is missing"));
+            };
+            estimated_minutes = Some(raw_minutes.parse::<u32>()?);
+            index += 2;
+            continue;
+        }
+
+        if let Some(minutes) = parse_duration_token(&normalized) {
+            estimated_minutes = Some(minutes);
+            index += 1;
+            continue;
+        }
+
+        title_tokens.push(token);
+        index += 1;
+    }
+
+    let title = title_tokens.join(" ").trim().to_string();
+    if title.is_empty() {
+        return Err(anyhow!("task title is required"));
+    }
+
+    Ok(CaptureTaskRequest {
+        title,
+        description: None,
+        due_date,
+        estimated_minutes,
+    })
+}
+
+fn parse_duration_token(token: &str) -> Option<u32> {
+    let minutes = token
+        .strip_suffix("minutes")
+        .or_else(|| token.strip_suffix("minute"))
+        .or_else(|| token.strip_suffix("mins"))
+        .or_else(|| token.strip_suffix("min"))
+        .or_else(|| token.strip_suffix('m'))
+        .and_then(|value| value.parse::<u32>().ok());
+    if minutes.is_some() {
+        return minutes;
+    }
+
+    token
+        .strip_suffix("hours")
+        .or_else(|| token.strip_suffix("hour"))
+        .or_else(|| token.strip_suffix("hrs"))
+        .or_else(|| token.strip_suffix("hr"))
+        .or_else(|| token.strip_suffix('h'))
+        .and_then(|value| value.parse::<f32>().ok())
+        .map(|hours| (hours * 60.0).round().max(1.0) as u32)
+}
+
 fn default_workday_availability(date: Date) -> Result<Vec<mnema_app::AvailabilityWindow>> {
     let start = date.with_hms(9, 0, 0)?.assume_utc();
     let end = date.with_hms(17, 0, 0)?.assume_utc();
@@ -2110,5 +2319,32 @@ fn schedule_state_label(state: &ScheduleBlockState) -> &'static str {
         ScheduleBlockState::Done => "done",
         ScheduleBlockState::Missed => "missed",
         ScheduleBlockState::Cancelled => "cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::date;
+
+    #[test]
+    fn parses_quick_capture_due_and_minutes() {
+        let request =
+            parse_quick_capture("Write proposal tomorrow 45m", date!(2026 - 06 - 25)).unwrap();
+
+        assert_eq!(request.title, "Write proposal");
+        assert_eq!(request.due_date, Some(date!(2026 - 06 - 26)));
+        assert_eq!(request.estimated_minutes, Some(45));
+    }
+
+    #[test]
+    fn parses_quick_capture_slash_due_and_hours() {
+        let request =
+            parse_quick_capture("Review notes /due 2026-06-30 1.5h", date!(2026 - 06 - 25))
+                .unwrap();
+
+        assert_eq!(request.title, "Review notes");
+        assert_eq!(request.due_date, Some(date!(2026 - 06 - 30)));
+        assert_eq!(request.estimated_minutes, Some(90));
     }
 }
