@@ -176,6 +176,7 @@ fn schedule_block_state_from_str(value: &str) -> ScheduleBlockState {
 fn schedule_block_source_to_str(source: &ScheduleBlockSource) -> &'static str {
     match source {
         ScheduleBlockSource::Scheduler => "SCHEDULER",
+        ScheduleBlockSource::Repair => "REPAIR",
         ScheduleBlockSource::Manual => "MANUAL",
         ScheduleBlockSource::ExternalCalendar => "EXTERNAL_CALENDAR",
     }
@@ -183,6 +184,7 @@ fn schedule_block_source_to_str(source: &ScheduleBlockSource) -> &'static str {
 
 fn schedule_block_source_from_str(value: &str) -> ScheduleBlockSource {
     match value {
+        "REPAIR" => ScheduleBlockSource::Repair,
         "MANUAL" => ScheduleBlockSource::Manual,
         "EXTERNAL_CALENDAR" => ScheduleBlockSource::ExternalCalendar,
         _ => ScheduleBlockSource::Scheduler,
@@ -914,7 +916,7 @@ impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
         sqlx::query(
             r#"
             DELETE FROM schedule_blocks
-            WHERE source = 'SCHEDULER'
+            WHERE source IN ('SCHEDULER', 'REPAIR')
               AND state = 'PROPOSED'
               AND start_at >= $1
               AND start_at < $2
@@ -1960,7 +1962,7 @@ impl ScheduleBlockRepository for SqliteScheduleBlockRepository {
         sqlx::query(
             r#"
             DELETE FROM schedule_blocks
-            WHERE source = 'SCHEDULER'
+            WHERE source IN ('SCHEDULER', 'REPAIR')
               AND state = 'PROPOSED'
               AND start_at >= ?
               AND start_at < ?

@@ -26,6 +26,7 @@ pub enum ScheduleBlockState {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ScheduleBlockSource {
     Scheduler,
+    Repair,
     Manual,
     ExternalCalendar,
 }

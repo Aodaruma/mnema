@@ -5,8 +5,8 @@ use std::{cmp::Reverse, collections::HashSet};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontTweak, RichText, ScrollArea,
-    Stroke, TextEdit,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, RichText, ScrollArea, Stroke,
+    TextEdit,
 };
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
@@ -21,7 +21,7 @@ use mnema_infra::{
 };
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
-use time::{Date, Month, OffsetDateTime, Time, Weekday, macros::format_description};
+use time::{Date, Month, OffsetDateTime, Time, UtcOffset, Weekday, macros::format_description};
 use tokio::runtime::Runtime;
 
 static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
@@ -91,6 +91,27 @@ struct TaskInlineEdit {
 }
 
 #[derive(Debug, Clone)]
+struct TaskDragPayload {
+    task_id: TaskId,
+    title: String,
+    estimated_minutes: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ManualScheduleRequest {
+    task_id: TaskId,
+    title: String,
+    start_at: OffsetDateTime,
+    duration_minutes: u32,
+}
+
+#[derive(Debug, Default)]
+struct HomeAgendaOutput {
+    repair_clicked: bool,
+    manual_schedule: Option<ManualScheduleRequest>,
+}
+
+#[derive(Debug, Clone)]
 struct StatusHistoryEntry {
     task_id: TaskId,
     task_title: String,
@@ -127,6 +148,7 @@ const FONT_WEIGHT_BOLD: f32 = 700.0;
 const LOGO_FONT_FAMILY: &str = "mnema_logo";
 const MATERIAL_ICON_FONT_FAMILY: &str = "mnema_material_icons";
 const DEFAULT_POSTGRES_URL: &str = "postgres://postgres:postgres@localhost/mnema";
+const DEFAULT_TIMEZONE_OFFSET: &str = "+09:00";
 
 const ICON_ASSISTANT: char = '\u{e39f}';
 const ICON_AUTORENEW: char = '\u{e863}';
@@ -135,6 +157,8 @@ const ICON_CLOSE: char = '\u{e5cd}';
 const ICON_DARK_MODE: char = '\u{e51c}';
 const ICON_DELETE: char = '\u{e872}';
 const ICON_EVENT: char = '\u{e878}';
+const ICON_EXPAND_MORE: char = '\u{e5cf}';
+const ICON_CHEVRON_RIGHT: char = '\u{e5cc}';
 const ICON_FOLDER: char = '\u{e2c7}';
 const ICON_HISTORY: char = '\u{e889}';
 const ICON_HOME: char = '\u{e88a}';
@@ -181,6 +205,8 @@ struct DesktopConfig {
     sqlite_path: String,
     database_url: String,
     dark_mode: bool,
+    #[serde(default = "default_timezone_offset")]
+    timezone_offset: String,
     llm_provider: DesktopLlmProvider,
     ollama_url: String,
     openai_url: String,
@@ -196,6 +222,7 @@ impl DesktopConfig {
             sqlite_path: default_sqlite_path().display().to_string(),
             database_url: DEFAULT_POSTGRES_URL.to_string(),
             dark_mode: default_dark_mode,
+            timezone_offset: default_timezone_offset(),
             llm_provider: DesktopLlmProvider::Disabled,
             ollama_url: "http://localhost:11434".to_string(),
             openai_url: "https://api.openai.com".to_string(),
@@ -209,6 +236,49 @@ impl DesktopConfig {
 
         serde_json::from_slice::<Self>(&bytes).unwrap_or(fallback)
     }
+}
+
+fn default_timezone_offset() -> String {
+    DEFAULT_TIMEZONE_OFFSET.to_string()
+}
+
+fn default_timezone() -> UtcOffset {
+    UtcOffset::from_hms(9, 0, 0).expect("default JST offset is valid")
+}
+
+fn parse_timezone_offset(value: &str) -> Result<UtcOffset> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("jst")
+        || value.eq_ignore_ascii_case("asia/tokyo")
+    {
+        return Ok(default_timezone());
+    }
+    if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
+        return Ok(UtcOffset::UTC);
+    }
+
+    let Some(sign_char) = value.chars().next() else {
+        return Err(anyhow!("timezoneは +09:00 の形式で入力してください"));
+    };
+    let sign = match sign_char {
+        '+' => 1_i8,
+        '-' => -1_i8,
+        _ => return Err(anyhow!("timezoneは +09:00 の形式で入力してください")),
+    };
+    let rest = &value[1..];
+    let parts = rest.split(':').collect::<Vec<_>>();
+    let [hours, minutes] = parts.as_slice() else {
+        return Err(anyhow!("timezoneは +09:00 の形式で入力してください"));
+    };
+    let hours = hours
+        .parse::<i8>()
+        .map_err(|_| anyhow!("timezone hourが不正です"))?;
+    let minutes = minutes
+        .parse::<i8>()
+        .map_err(|_| anyhow!("timezone minuteが不正です"))?;
+    UtcOffset::from_hms(sign * hours, sign * minutes, 0)
+        .map_err(|_| anyhow!("timezone offsetが不正です"))
 }
 
 struct NativeMenu {
@@ -449,7 +519,9 @@ struct MnemaGuiApp {
     openai_url: String,
     planning_model: String,
     routine_model: String,
+    timezone_offset: String,
     view: View,
+    last_view: View,
     task_title: String,
     quick_capture: String,
     assistant_input: String,
@@ -485,6 +557,7 @@ struct MnemaGuiApp {
     milestone_target_date: String,
     project_view_mode: ProjectViewMode,
     plan: Option<PlanTodayResult>,
+    plan_source: ScheduleBlockSource,
     schedule: Vec<ScheduleBlock>,
     schedule_month: Vec<ScheduleBlock>,
     automation_logs: Vec<AutomationLog>,
@@ -514,8 +587,10 @@ impl MnemaGuiApp {
         };
         let native_menu_synced_dark_mode = native_menu.as_ref().map(|_| dark_mode);
 
-        let today = OffsetDateTime::now_utc().date().to_string();
-        let current_time = format_hm(OffsetDateTime::now_utc());
+        let timezone = parse_timezone_offset(&config.timezone_offset).unwrap_or(default_timezone());
+        let now = OffsetDateTime::now_utc().to_offset(timezone);
+        let today = now.date().to_string();
+        let current_time = format_hm(now);
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
         let mut app = Self {
             runtime,
@@ -530,7 +605,9 @@ impl MnemaGuiApp {
             openai_url: config.openai_url,
             planning_model: config.planning_model,
             routine_model: config.routine_model,
+            timezone_offset: config.timezone_offset,
             view: View::Home,
+            last_view: View::Settings,
             task_title: String::new(),
             quick_capture: String::new(),
             assistant_input: String::new(),
@@ -548,7 +625,7 @@ impl MnemaGuiApp {
             schedule_edit_end: String::new(),
             confirm_plan_save: false,
             target_date: today.clone(),
-            scroll_home_agenda_to_now: false,
+            scroll_home_agenda_to_now: true,
             repair_from_time: current_time,
             schedule_view_mode: ScheduleViewMode::Day,
             tasks: Vec::new(),
@@ -571,6 +648,7 @@ impl MnemaGuiApp {
             milestone_target_date: today.clone(),
             project_view_mode: ProjectViewMode::Details,
             plan: None,
+            plan_source: ScheduleBlockSource::Scheduler,
             schedule: Vec::new(),
             schedule_month: Vec::new(),
             automation_logs: Vec::new(),
@@ -941,13 +1019,14 @@ impl MnemaGuiApp {
                 }
             }
             TaskInlineField::DueDate => {
-                due_date = match parse_optional_date(&value) {
-                    Ok(date) => date,
-                    Err(error) => {
-                        self.set_error(error);
-                        return;
-                    }
-                };
+                due_date =
+                    match parse_optional_date_with_today(&value, self.now_in_timezone().date()) {
+                        Ok(date) => date,
+                        Err(error) => {
+                            self.set_error(error);
+                            return;
+                        }
+                    };
             }
             TaskInlineField::EstimateMinutes => {
                 estimated_minutes = match parse_optional_u32(&value) {
@@ -1016,7 +1095,7 @@ impl MnemaGuiApp {
             return;
         }
 
-        match parse_quick_capture(&input, OffsetDateTime::now_utc().date()) {
+        match parse_quick_capture(&input, self.now_in_timezone().date()) {
             Ok(request) => {
                 let title = request.title.clone();
                 self.capture_task(request);
@@ -1117,6 +1196,7 @@ impl MnemaGuiApp {
                 }
             })
             .collect::<Vec<_>>();
+        let timezone = self.app_timezone();
         let schedule = self
             .schedule
             .iter()
@@ -1124,8 +1204,8 @@ impl MnemaGuiApp {
             .map(|block| {
                 format!(
                     "- {}-{} {} [{}]",
-                    format_hm(block.start_at),
-                    format_hm(block.end_at),
+                    format_hm_in(block.start_at, timezone),
+                    format_hm_in(block.end_at, timezone),
                     block
                         .title_snapshot
                         .as_deref()
@@ -1293,9 +1373,10 @@ impl MnemaGuiApp {
             self.set_error(anyhow!("schedule block not found"));
             return;
         };
+        let timezone = self.app_timezone();
         self.editing_schedule_block_id = Some(block.id.clone());
-        self.schedule_edit_start = format_hm(block.start_at);
-        self.schedule_edit_end = format_hm(block.end_at);
+        self.schedule_edit_start = format_hm_in(block.start_at, timezone);
+        self.schedule_edit_end = format_hm_in(block.end_at, timezone);
         self.error = None;
     }
 
@@ -1310,14 +1391,15 @@ impl MnemaGuiApp {
                 return;
             }
         };
-        let start_at = match parse_hm_for_date(&self.schedule_edit_start, target_date) {
+        let timezone = self.app_timezone();
+        let start_at = match parse_hm_for_date(&self.schedule_edit_start, target_date, timezone) {
             Ok(value) => value,
             Err(error) => {
                 self.set_error(error);
                 return;
             }
         };
-        let end_at = match parse_hm_for_date(&self.schedule_edit_end, target_date) {
+        let end_at = match parse_hm_for_date(&self.schedule_edit_end, target_date, timezone) {
             Ok(value) => value,
             Err(error) => {
                 self.set_error(error);
@@ -1382,13 +1464,14 @@ impl MnemaGuiApp {
             return;
         }
 
-        let due_date = match parse_optional_date(&self.due_date) {
-            Ok(date) => date,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
+        let due_date =
+            match parse_optional_date_with_today(&self.due_date, self.now_in_timezone().date()) {
+                Ok(date) => date,
+                Err(error) => {
+                    self.set_error(error);
+                    return;
+                }
+            };
         let estimated_minutes = match parse_optional_u32(&self.minutes) {
             Ok(minutes) => minutes,
             Err(error) => {
@@ -1472,14 +1555,20 @@ impl MnemaGuiApp {
             self.set_error(anyhow!("プロジェクト名を入力してください"));
             return;
         }
-        let start_date = match parse_optional_date(&self.project_start_date) {
+        let start_date = match parse_optional_date_with_today(
+            &self.project_start_date,
+            self.now_in_timezone().date(),
+        ) {
             Ok(date) => date,
             Err(error) => {
                 self.set_error(error);
                 return;
             }
         };
-        let end_date = match parse_optional_date(&self.project_end_date) {
+        let end_date = match parse_optional_date_with_today(
+            &self.project_end_date,
+            self.now_in_timezone().date(),
+        ) {
             Ok(date) => date,
             Err(error) => {
                 self.set_error(error);
@@ -1607,6 +1696,7 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
+        let timezone = self.app_timezone();
         let target_date = match parse_required_date(&self.target_date) {
             Ok(date) => date,
             Err(error) => {
@@ -1614,7 +1704,7 @@ impl MnemaGuiApp {
                 return;
             }
         };
-        let availability = match default_workday_availability(target_date) {
+        let availability = match default_workday_availability(target_date, timezone) {
             Ok(availability) => availability,
             Err(error) => {
                 self.set_error(error);
@@ -1650,6 +1740,7 @@ impl MnemaGuiApp {
             Ok((plan, saved)) => {
                 let block_count = plan.output.blocks.len();
                 self.plan = Some(plan);
+                self.plan_source = ScheduleBlockSource::Scheduler;
                 self.message = if save {
                     format!("Saved {saved} proposed blocks")
                 } else {
@@ -1683,6 +1774,7 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
+        let timezone = self.app_timezone();
         let target_date = match parse_required_date(&self.target_date) {
             Ok(date) => date,
             Err(error) => {
@@ -1690,14 +1782,14 @@ impl MnemaGuiApp {
                 return;
             }
         };
-        let repair_from = match parse_hm_for_date(&self.repair_from_time, target_date) {
+        let repair_from = match parse_hm_for_date(&self.repair_from_time, target_date, timezone) {
             Ok(value) => value,
             Err(error) => {
                 self.set_error(error);
                 return;
             }
         };
-        let availability = match default_workday_availability(target_date) {
+        let availability = match default_workday_availability(target_date, timezone) {
             Ok(availability) => availability,
             Err(error) => {
                 self.set_error(error);
@@ -1724,7 +1816,7 @@ impl MnemaGuiApp {
 
             let saved = if save {
                 let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
-                store.save_proposed_plan(&repair.plan).await?.len()
+                store.save_repaired_plan(&repair.plan).await?.len()
             } else {
                 0
             };
@@ -1737,6 +1829,7 @@ impl MnemaGuiApp {
                 let block_count = repair.plan.output.blocks.len();
                 let fixed_count = repair.fixed_blocks.len();
                 self.plan = Some(repair.plan);
+                self.plan_source = ScheduleBlockSource::Repair;
                 self.message = if save {
                     format!("Saved repaired plan: {saved} proposed blocks, {fixed_count} fixed")
                 } else {
@@ -1747,6 +1840,45 @@ impl MnemaGuiApp {
                     self.refresh_schedule();
                     self.refresh_schedule_month();
                 }
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn create_manual_schedule_block(&mut self, request: ManualScheduleRequest) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let duration = time::Duration::minutes(i64::from(request.duration_minutes.max(1)));
+        let now = OffsetDateTime::now_utc();
+        let title = request.title.clone();
+        let block = ScheduleBlock {
+            id: ScheduleBlockId::new(),
+            task_id: Some(request.task_id),
+            title_snapshot: Some(request.title),
+            start_at: request.start_at,
+            end_at: request.start_at + duration,
+            block_type: ScheduleBlockType::Task,
+            state: ScheduleBlockState::Scheduled,
+            locked: true,
+            source: ScheduleBlockSource::Manual,
+            required_minutes: Some(request.duration_minutes.max(1)),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let result = self.runtime.block_on(async move {
+            vault.schedule_block_repo().insert(block).await?;
+            Result::<()>::Ok(())
+        });
+
+        match result {
+            Ok(()) => {
+                self.plan = None;
+                self.message = format!("Scheduled manually: {title}");
+                self.error = None;
+                self.refresh_schedule();
+                self.refresh_schedule_month();
             }
             Err(error) => self.set_error(error),
         }
@@ -1779,6 +1911,14 @@ impl MnemaGuiApp {
         }
     }
 
+    fn app_timezone(&self) -> UtcOffset {
+        parse_timezone_offset(&self.timezone_offset).unwrap_or(default_timezone())
+    }
+
+    fn now_in_timezone(&self) -> OffsetDateTime {
+        OffsetDateTime::now_utc().to_offset(self.app_timezone())
+    }
+
     fn selected_project_title(&self) -> Option<String> {
         let selected_id = self.selected_project_id.as_ref()?;
         self.projects
@@ -1788,12 +1928,17 @@ impl MnemaGuiApp {
     }
 
     fn save_settings(&mut self) {
+        if let Err(error) = parse_timezone_offset(&self.timezone_offset) {
+            self.set_error(error);
+            return;
+        }
         let config = DesktopConfig {
             vault_path: self.normalized_vault_path().display().to_string(),
             storage_backend: self.selected_backend,
             sqlite_path: self.normalized_sqlite_path().display().to_string(),
             database_url: self.normalized_database_url(),
             dark_mode: self.dark_mode,
+            timezone_offset: self.timezone_offset.trim().to_string(),
             llm_provider: self.llm_provider,
             ollama_url: self.ollama_url.trim().to_string(),
             openai_url: self.openai_url.trim().to_string(),
@@ -1810,6 +1955,8 @@ impl MnemaGuiApp {
                 self.openai_url = config.openai_url;
                 self.planning_model = config.planning_model;
                 self.routine_model = config.routine_model;
+                self.timezone_offset = config.timezone_offset;
+                self.scroll_home_agenda_to_now = true;
                 self.settings_message = String::from("Settings saved");
                 self.error = None;
             }
@@ -1916,8 +2063,6 @@ impl eframe::App for MnemaGuiApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.heading(logo_text("Mnema").color(palette.brand));
-                ui.add_space(12.0);
-                ui.label(format!("Vault: {}", self.normalized_vault_path().display()));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     theme_toggle(ui, &mut self.dark_mode, palette);
                     if ui.button(format!("{ICON_REFRESH} Refresh")).clicked() {
@@ -1968,6 +2113,10 @@ impl eframe::App for MnemaGuiApp {
                     "Settings",
                 );
             });
+        if self.view == View::Home && self.last_view != View::Home {
+            self.scroll_home_agenda_to_now = true;
+        }
+        self.last_view = self.view;
 
         egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
             ui.add_space(6.0);
@@ -2001,6 +2150,7 @@ impl MnemaGuiApp {
         let mut repair_from_now = false;
         let mut home_date_changed = false;
         let mut scroll_home_agenda_to_now = false;
+        let timezone = self.app_timezone();
 
         ui.columns(2, |columns| {
             columns[0].label(bold_text("Tasks").color(palette.section));
@@ -2016,22 +2166,27 @@ impl MnemaGuiApp {
                 self.confirming_delete_task_id.as_ref(),
                 &mut self.inline_task_edit,
                 Some(360.0),
+                timezone,
                 palette,
             );
-            done_task_section(
+            if let Some(action) = done_task_section(
                 &mut columns[0],
                 &self.done_tasks,
+                &self.statuses,
+                &self.status_groups,
                 &self.lists,
                 &self.projects,
                 &mut self.show_done_tasks,
                 &mut self.done_task_limit,
                 palette,
-            );
+            ) {
+                task_action = Some(action);
+            }
 
             columns[1].horizontal(|ui| {
                 ui.label(bold_text("Agenda").color(palette.section));
                 ui.add_space(12.0);
-                let date_output = date_editor_with_output(ui, &mut self.target_date);
+                let date_output = date_editor_with_output(ui, &mut self.target_date, timezone);
                 if date_output.changed {
                     home_date_changed = true;
                 }
@@ -2062,15 +2217,21 @@ impl MnemaGuiApp {
             }
             columns[1].add_space(8.0);
             let target_date = parse_required_date(&self.target_date)
-                .unwrap_or_else(|_| OffsetDateTime::now_utc().date());
-            repair_from_now = home_agenda_view(
+                .unwrap_or_else(|_| OffsetDateTime::now_utc().to_offset(timezone).date());
+            let agenda_output = home_agenda_view(
                 &mut columns[1],
                 target_date,
                 self.plan.as_ref(),
+                self.plan_source.clone(),
                 &self.schedule,
                 self.scroll_home_agenda_to_now || scroll_home_agenda_to_now,
+                timezone,
                 palette,
             );
+            repair_from_now = agenda_output.repair_clicked;
+            if let Some(request) = agenda_output.manual_schedule {
+                self.create_manual_schedule_block(request);
+            }
         });
         if self.scroll_home_agenda_to_now || scroll_home_agenda_to_now {
             self.scroll_home_agenda_to_now = false;
@@ -2095,13 +2256,14 @@ impl MnemaGuiApp {
             self.message = String::from("Save cancelled");
         }
         if repair_from_now {
-            self.repair_from_time = format_hm(OffsetDateTime::now_utc());
+            self.repair_from_time = format_hm(self.now_in_timezone());
             self.repair_schedule(true);
         }
     }
 
     fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Inbox", palette);
+        let timezone = self.app_timezone();
         ui.horizontal(|ui| {
             ui.add_sized(
                 [560.0, INPUT_HEIGHT],
@@ -2121,7 +2283,7 @@ impl MnemaGuiApp {
                 text_field(&mut self.task_title, "Task title"),
             );
             ui.label("Due");
-            date_editor(ui, &mut self.due_date);
+            date_editor(ui, &mut self.due_date, timezone);
             ui.label("Estimate");
             minutes_editor(ui, &mut self.minutes);
             if ui.button("Add").clicked() {
@@ -2140,6 +2302,7 @@ impl MnemaGuiApp {
             self.confirming_delete_task_id.as_ref(),
             &mut self.inline_task_edit,
             None,
+            timezone,
             palette,
         ) {
             self.handle_task_action(action);
@@ -2176,6 +2339,7 @@ impl MnemaGuiApp {
 
     fn show_projects(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Projects", palette);
+        let timezone = self.app_timezone();
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.project_view_mode,
@@ -2191,9 +2355,9 @@ impl MnemaGuiApp {
                 text_field(&mut self.project_title, "Project title"),
             );
             ui.label("Start");
-            date_editor(ui, &mut self.project_start_date);
+            date_editor(ui, &mut self.project_start_date, timezone);
             ui.label("End");
-            date_editor(ui, &mut self.project_end_date);
+            date_editor(ui, &mut self.project_end_date, timezone);
             if ui.button("Add").clicked() {
                 self.add_project();
             }
@@ -2268,6 +2432,7 @@ impl MnemaGuiApp {
     }
 
     fn show_project_children(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        let timezone = self.app_timezone();
         ui.label(bold_text("Lists").color(palette.section));
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -2299,7 +2464,7 @@ impl MnemaGuiApp {
                 text_field(&mut self.milestone_title, "Milestone title"),
             );
             ui.label("Target");
-            date_editor(ui, &mut self.milestone_target_date);
+            date_editor(ui, &mut self.milestone_target_date, timezone);
             if ui.button("Add milestone").clicked() {
                 self.add_milestone();
             }
@@ -2323,6 +2488,7 @@ impl MnemaGuiApp {
 
     fn show_activity(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Activity", palette);
+        let timezone = self.app_timezone();
         ui.horizontal(|ui| {
             if ui.button("Refresh").clicked() {
                 self.refresh_automation_logs();
@@ -2343,7 +2509,10 @@ impl MnemaGuiApp {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(bold_text(automation_action_label(&log.action_type)));
-                            ui.label(regular_text(format_hm(log.created_at)).color(palette.muted));
+                            ui.label(
+                                regular_text(format_hm_in(log.created_at, timezone))
+                                    .color(palette.muted),
+                            );
                         });
                         if let Some(title) = automation_log_title(log) {
                             ui.label(title);
@@ -2359,6 +2528,7 @@ impl MnemaGuiApp {
 
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Schedule", palette);
+        let timezone = self.app_timezone();
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.schedule_view_mode, ScheduleViewMode::Day, "Day");
             ui.selectable_value(
@@ -2368,7 +2538,7 @@ impl MnemaGuiApp {
             );
             ui.separator();
             ui.label("Date");
-            date_editor(ui, &mut self.target_date);
+            date_editor(ui, &mut self.target_date, timezone);
             if self.schedule_view_mode == ScheduleViewMode::Calendar {
                 if ui.button("Prev month").clicked() {
                     shift_month(&mut self.target_date, -1);
@@ -2404,16 +2574,20 @@ impl MnemaGuiApp {
                 }
 
                 if let Some(action) =
-                    schedule_calendar_view(ui, target_date, &self.schedule, palette)
+                    schedule_calendar_view(ui, target_date, &self.schedule, timezone, palette)
                 {
                     self.handle_schedule_action(action);
                 }
                 self.show_schedule_block_editor(ui, palette);
             }
             ScheduleViewMode::Calendar => {
-                if let Some(selected_date) =
-                    schedule_month_calendar(ui, target_date, &self.schedule_month, palette)
-                {
+                if let Some(selected_date) = schedule_month_calendar(
+                    ui,
+                    target_date,
+                    &self.schedule_month,
+                    timezone,
+                    palette,
+                ) {
                     let month_changed = selected_date.month() != target_date.month()
                         || selected_date.year() != target_date.year();
                     self.target_date = selected_date.to_string();
@@ -2471,6 +2645,21 @@ impl MnemaGuiApp {
                     [520.0, INPUT_HEIGHT],
                     text_field(&mut self.database_url, DEFAULT_POSTGRES_URL),
                 );
+                ui.end_row();
+
+                ui.label("Timezone");
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [160.0, INPUT_HEIGHT],
+                        text_field(&mut self.timezone_offset, "+09:00 / JST"),
+                    );
+                    if ui.button("JST").clicked() {
+                        self.timezone_offset = DEFAULT_TIMEZONE_OFFSET.to_string();
+                    }
+                    if ui.button("UTC").clicked() {
+                        self.timezone_offset = "+00:00".to_string();
+                    }
+                });
                 ui.end_row();
 
                 ui.label("LLM provider");
@@ -2725,10 +2914,7 @@ fn configure_fonts(ctx: &egui::Context) {
         let font_name = "noto_sans_jp".to_owned();
         fonts.font_data.insert(
             font_name.clone(),
-            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
-                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_REGULAR)]),
-                ..Default::default()
-            })),
+            Arc::new(FontData::from_owned(font_bytes)),
         );
 
         if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
@@ -2743,10 +2929,7 @@ fn configure_fonts(ctx: &egui::Context) {
         let font_name = "montserrat".to_owned();
         fonts.font_data.insert(
             font_name.clone(),
-            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
-                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_BOLD)]),
-                ..Default::default()
-            })),
+            Arc::new(FontData::from_owned(font_bytes)),
         );
         fonts
             .families
@@ -2881,16 +3064,13 @@ fn regular_text(text: impl Into<String>) -> RichText {
 }
 
 fn bold_text(text: impl Into<String>) -> RichText {
-    regular_text(text)
-        .variation("wght", FONT_WEIGHT_BOLD)
-        .strong()
+    regular_text(text).variation("wght", FONT_WEIGHT_BOLD)
 }
 
 fn logo_text(text: impl Into<String>) -> RichText {
     RichText::new(text)
         .family(FontFamily::Name(LOGO_FONT_FAMILY.into()))
         .variation("wght", FONT_WEIGHT_BOLD)
-        .strong()
 }
 
 fn material_icon_text(icon: char, size: f32, color: Color32) -> RichText {
@@ -2916,11 +3096,15 @@ struct DateEditorOutput {
     today_again: bool,
 }
 
-fn date_editor(ui: &mut egui::Ui, value: &mut String) -> bool {
-    date_editor_with_output(ui, value).changed
+fn date_editor(ui: &mut egui::Ui, value: &mut String, timezone: UtcOffset) -> bool {
+    date_editor_with_output(ui, value, timezone).changed
 }
 
-fn date_editor_with_output(ui: &mut egui::Ui, value: &mut String) -> DateEditorOutput {
+fn date_editor_with_output(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    timezone: UtcOffset,
+) -> DateEditorOutput {
     let mut output = DateEditorOutput {
         changed: ui
             .add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"))
@@ -2928,11 +3112,14 @@ fn date_editor_with_output(ui: &mut egui::Ui, value: &mut String) -> DateEditorO
         today_again: false,
     };
     if ui.button("‹").clicked() {
-        shift_date(value, -1);
+        shift_date(value, -1, timezone);
         output.changed = true;
     }
     if ui.button("Today").clicked() {
-        let today = OffsetDateTime::now_utc().date().to_string();
+        let today = OffsetDateTime::now_utc()
+            .to_offset(timezone)
+            .date()
+            .to_string();
         if value.trim() == today {
             output.today_again = true;
         } else {
@@ -2941,7 +3128,7 @@ fn date_editor_with_output(ui: &mut egui::Ui, value: &mut String) -> DateEditorO
         }
     }
     if ui.button("›").clicked() {
-        shift_date(value, 1);
+        shift_date(value, 1, timezone);
         output.changed = true;
     }
     output
@@ -2954,11 +3141,11 @@ fn inline_text_field<'a>(value: &'a mut String, width: f32) -> TextEdit<'a> {
         .frame(egui::Frame::NONE)
 }
 
-fn shift_date(value: &mut String, days: i64) {
+fn shift_date(value: &mut String, days: i64, timezone: UtcOffset) {
     let base = parse_optional_date(value)
         .ok()
         .flatten()
-        .unwrap_or_else(|| OffsetDateTime::now_utc().date());
+        .unwrap_or_else(|| OffsetDateTime::now_utc().to_offset(timezone).date());
     let shifted = if days < 0 {
         base.previous_day().unwrap_or(base)
     } else {
@@ -3163,6 +3350,7 @@ fn task_list(
     confirming_delete_task_id: Option<&TaskId>,
     inline_task_edit: &mut Option<TaskInlineEdit>,
     max_height: Option<f32>,
+    timezone: UtcOffset,
     palette: Palette,
 ) -> Option<TaskAction> {
     if tasks.is_empty() {
@@ -3180,93 +3368,109 @@ fn task_list(
     scroll_area.show(ui, |ui| {
         for task in tasks {
             let row_height = 64.0;
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), row_height),
-                egui::Layout::left_to_right(Align::Center),
-                |ui| {
-                    task_status_button(
-                        ui,
-                        id_salt,
-                        task,
-                        statuses,
-                        status_groups,
-                        palette,
-                        &mut action,
+            let payload = TaskDragPayload {
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                estimated_minutes: task.estimated_minutes,
+            };
+            let drag_id = ui.make_persistent_id((id_salt, "task_drag", task.id.clone()));
+            let response = ui
+                .dnd_drag_source(drag_id, payload, |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Layout::left_to_right(Align::Center),
+                        |ui| {
+                            task_status_button(
+                                ui,
+                                id_salt,
+                                task,
+                                statuses,
+                                status_groups,
+                                palette,
+                                &mut action,
+                            );
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    regular_text(task_context_line(task, lists, projects))
+                                        .size(11.0)
+                                        .color(palette.muted),
+                                );
+                                inline_task_title(
+                                    ui,
+                                    id_salt,
+                                    task,
+                                    palette,
+                                    inline_task_edit,
+                                    &mut action,
+                                );
+                                ui.horizontal(|ui| {
+                                    inline_task_meta(
+                                        ui,
+                                        id_salt,
+                                        task,
+                                        TaskInlineField::DueDate,
+                                        task.due_date
+                                            .map(|date| format!("due {date}"))
+                                            .unwrap_or_else(|| "due none".to_string()),
+                                        task.due_date
+                                            .map(|date| date.to_string())
+                                            .unwrap_or_default(),
+                                        92.0,
+                                        palette.due,
+                                        palette,
+                                        timezone,
+                                        inline_task_edit,
+                                        &mut action,
+                                    );
+                                    inline_task_meta(
+                                        ui,
+                                        id_salt,
+                                        task,
+                                        TaskInlineField::EstimateMinutes,
+                                        task.estimated_minutes
+                                            .map(|minutes| format!("{minutes} min"))
+                                            .unwrap_or_else(|| "estimate none".to_string()),
+                                        task.estimated_minutes
+                                            .map(|minutes| minutes.to_string())
+                                            .unwrap_or_default(),
+                                        82.0,
+                                        palette.muted,
+                                        palette,
+                                        timezone,
+                                        inline_task_edit,
+                                        &mut action,
+                                    );
+                                });
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                let confirming = confirming_delete_task_id == Some(&task.id);
+                                if confirming {
+                                    if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
+                                        .clicked()
+                                    {
+                                        action = Some(TaskAction::ConfirmDelete(task.id.clone()));
+                                    }
+                                    if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
+                                        .clicked()
+                                    {
+                                        action = Some(TaskAction::CancelDelete);
+                                    }
+                                    ui.label(regular_text("Delete?").color(palette.warning));
+                                } else if subtle_icon_button(ui, ICON_DELETE, "Delete", palette)
+                                    .clicked()
+                                {
+                                    action = Some(TaskAction::RequestDelete(task.id.clone()));
+                                }
+                            });
+                        },
                     );
-                    ui.add_space(6.0);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            regular_text(task_context_line(task, lists, projects))
-                                .size(11.0)
-                                .color(palette.muted),
-                        );
-                        inline_task_title(
-                            ui,
-                            id_salt,
-                            task,
-                            palette,
-                            inline_task_edit,
-                            &mut action,
-                        );
-                        ui.horizontal(|ui| {
-                            inline_task_meta(
-                                ui,
-                                id_salt,
-                                task,
-                                TaskInlineField::DueDate,
-                                task.due_date
-                                    .map(|date| format!("due {date}"))
-                                    .unwrap_or_else(|| "due none".to_string()),
-                                task.due_date
-                                    .map(|date| date.to_string())
-                                    .unwrap_or_default(),
-                                92.0,
-                                palette.due,
-                                palette,
-                                inline_task_edit,
-                                &mut action,
-                            );
-                            inline_task_meta(
-                                ui,
-                                id_salt,
-                                task,
-                                TaskInlineField::EstimateMinutes,
-                                task.estimated_minutes
-                                    .map(|minutes| format!("{minutes} min"))
-                                    .unwrap_or_else(|| "estimate none".to_string()),
-                                task.estimated_minutes
-                                    .map(|minutes| minutes.to_string())
-                                    .unwrap_or_default(),
-                                82.0,
-                                palette.muted,
-                                palette,
-                                inline_task_edit,
-                                &mut action,
-                            );
-                        });
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        let confirming = confirming_delete_task_id == Some(&task.id);
-                        if confirming {
-                            if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
-                                .clicked()
-                            {
-                                action = Some(TaskAction::ConfirmDelete(task.id.clone()));
-                            }
-                            if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
-                                .clicked()
-                            {
-                                action = Some(TaskAction::CancelDelete);
-                            }
-                            ui.label(regular_text("Delete?").color(palette.warning));
-                        } else {
-                            if subtle_icon_button(ui, ICON_DELETE, "Delete", palette).clicked() {
-                                action = Some(TaskAction::RequestDelete(task.id.clone()));
-                            }
-                        }
-                    });
-                },
-            );
+                })
+                .response
+                .on_hover_cursor(egui::CursorIcon::Grab);
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
             ui.separator();
         }
     });
@@ -3276,48 +3480,78 @@ fn task_list(
 fn done_task_section(
     ui: &mut egui::Ui,
     done_tasks: &[Task],
+    statuses: &[Status],
+    status_groups: &[StatusGroup],
     lists: &[List],
     projects: &[Project],
     show_done_tasks: &mut bool,
     done_task_limit: &mut usize,
     palette: Palette,
-) {
+) -> Option<TaskAction> {
     if done_tasks.is_empty() {
-        return;
+        return None;
     }
 
+    let mut action = None;
     ui.add_space(8.0);
     ui.separator();
     ui.horizontal(|ui| {
-        ui.checkbox(show_done_tasks, "");
-        ui.label(bold_text(format!("Done ({})", done_tasks.len())).color(palette.muted));
+        let icon = if *show_done_tasks {
+            ICON_EXPAND_MORE
+        } else {
+            ICON_CHEVRON_RIGHT
+        };
+        if subtle_icon_button(ui, icon, "Toggle done tasks", palette).clicked() {
+            *show_done_tasks = !*show_done_tasks;
+        }
+        let response = ui.add(
+            egui::Label::new(
+                bold_text(format!("Done ({})", done_tasks.len())).color(palette.muted),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if response.clicked() {
+            *show_done_tasks = !*show_done_tasks;
+        }
     });
     if !*show_done_tasks {
-        return;
+        return None;
     }
 
     let visible_count = (*done_task_limit).min(done_tasks.len());
     for task in done_tasks.iter().take(visible_count) {
         ui.horizontal(|ui| {
-            ui.add_space(20.0);
+            task_status_button(
+                ui,
+                "done_tasks",
+                task,
+                statuses,
+                status_groups,
+                palette,
+                &mut action,
+            );
+            ui.add_space(6.0);
             ui.vertical(|ui| {
                 ui.label(
-                    regular_text(task.title.as_str())
-                        .size(12.0)
+                    regular_text(task_context_line(task, lists, projects))
+                        .size(11.0)
                         .color(palette.muted),
                 );
                 ui.label(
-                    regular_text(task_context_line(task, lists, projects))
-                        .size(10.0)
-                        .color(palette.muted),
+                    regular_text(task.title.as_str())
+                        .size(13.0)
+                        .color(palette.text),
                 );
             });
         });
+        ui.separator();
     }
 
     if visible_count < done_tasks.len() && ui.button("Load more done").clicked() {
         *done_task_limit = (*done_task_limit + 10).min(done_tasks.len());
     }
+
+    action
 }
 
 fn task_status_button(
@@ -3438,6 +3672,7 @@ fn inline_task_meta(
     width: f32,
     color: Color32,
     palette: Palette,
+    timezone: UtcOffset,
     inline_task_edit: &mut Option<TaskInlineEdit>,
     action: &mut Option<TaskAction>,
 ) {
@@ -3473,6 +3708,7 @@ fn inline_task_meta(
                 &mut edit.value,
                 action,
                 palette,
+                timezone,
             );
 
             let enter =
@@ -3516,6 +3752,7 @@ fn inline_task_meta_popup(
     value: &mut String,
     action: &mut Option<TaskAction>,
     palette: Palette,
+    timezone: UtcOffset,
 ) -> bool {
     let popup_id = ui.make_persistent_id((id_salt, "inline_meta_popup", task.id.clone(), field));
     let mut selected = false;
@@ -3543,7 +3780,7 @@ fn inline_task_meta_popup(
         .show(|ui| {
             selected = match field {
                 TaskInlineField::DueDate => {
-                    due_date_inline_options(ui, task, value, action, palette)
+                    due_date_inline_options(ui, task, value, action, palette, timezone)
                 }
                 TaskInlineField::EstimateMinutes => {
                     estimate_inline_options(ui, task, value, action, palette)
@@ -3561,6 +3798,7 @@ fn due_date_inline_options(
     value: &mut String,
     action: &mut Option<TaskAction>,
     palette: Palette,
+    timezone: UtcOffset,
 ) -> bool {
     if is_textual_date_query(value) {
         ui.label(regular_text("Suggestions").size(10.0).color(palette.muted));
@@ -3571,7 +3809,7 @@ fn due_date_inline_options(
                 .color(palette.muted),
         );
     }
-    let candidates = due_date_candidates(value);
+    let candidates = due_date_candidates(value, timezone);
     let mut selected = false;
     for row in candidates.chunks(3) {
         ui.horizontal(|ui| {
@@ -3638,6 +3876,7 @@ fn inline_choice(ui: &mut egui::Ui, label: &str, palette: Palette) -> egui::Resp
         egui::Label::new(regular_text(label).size(11.0).color(palette.accent))
             .sense(egui::Sense::click()),
     )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn status_candidates<'a>(
@@ -3726,14 +3965,16 @@ fn home_agenda_view(
     ui: &mut egui::Ui,
     target_date: Date,
     plan: Option<&PlanTodayResult>,
+    plan_source: ScheduleBlockSource,
     schedule: &[ScheduleBlock],
     scroll_to_now: bool,
+    timezone: UtcOffset,
     palette: Palette,
-) -> bool {
+) -> HomeAgendaOutput {
     let proposed_blocks = plan
         .filter(|plan| plan.target_date == target_date)
         .map(|plan| plan.output.blocks.as_slice());
-    let mut repair_clicked = false;
+    let mut output = HomeAgendaOutput::default();
 
     if let Some(plan) = plan.filter(|plan| plan.target_date == target_date) {
         ui.horizontal(|ui| {
@@ -3772,14 +4013,15 @@ fn home_agenda_view(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let day_start = match target_date.with_hms(0, 0, 0) {
-                Ok(value) => value.assume_utc(),
+                Ok(value) => value.assume_offset(timezone),
                 Err(_) => return,
             };
             let day_end = day_start + time::Duration::days(1);
             let total_minutes = (day_end - day_start).whole_minutes() as f32;
             let width = ui.available_width().max(420.0);
             let height = 24.0 * 72.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
             let painter = ui.painter_at(rect);
             painter.rect(
                 rect,
@@ -3795,6 +4037,7 @@ fn home_agenda_view(
                 target_date,
                 day_start,
                 total_minutes,
+                timezone,
                 palette,
             );
 
@@ -3806,13 +4049,45 @@ fn home_agenda_view(
                         day_start,
                         total_minutes,
                         block,
+                        &plan_source,
+                        timezone,
                         palette,
                     );
                 }
             } else {
                 for block in schedule {
-                    draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
+                    draw_schedule_block(
+                        &painter,
+                        rect,
+                        day_start,
+                        total_minutes,
+                        block,
+                        timezone,
+                        palette,
+                    );
                 }
+            }
+
+            if response.dnd_hover_payload::<TaskDragPayload>().is_some() {
+                painter.rect(
+                    rect.shrink(2.0),
+                    8.0,
+                    Color32::TRANSPARENT,
+                    Stroke::new(2.0, palette.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if let Some(payload) = response.dnd_release_payload::<TaskDragPayload>()
+                && let Some(pointer) = ui.ctx().pointer_interact_pos()
+                && rect.contains(pointer)
+            {
+                let start_at = agenda_time_from_y(pointer.y, rect, day_start, total_minutes);
+                output.manual_schedule = Some(ManualScheduleRequest {
+                    task_id: payload.task_id.clone(),
+                    title: payload.title.clone(),
+                    start_at,
+                    duration_minutes: payload.estimated_minutes.unwrap_or(30).max(1),
+                });
             }
 
             if draw_current_time_repair(
@@ -3823,13 +4098,14 @@ fn home_agenda_view(
                 day_start,
                 total_minutes,
                 scroll_to_now,
+                timezone,
                 palette,
             ) {
-                repair_clicked = true;
+                output.repair_clicked = true;
             }
         });
 
-    repair_clicked
+    output
 }
 
 fn draw_agenda_hour_grid(
@@ -3838,6 +4114,7 @@ fn draw_agenda_hour_grid(
     target_date: Date,
     day_start: OffsetDateTime,
     total_minutes: f32,
+    timezone: UtcOffset,
     palette: Palette,
 ) {
     let label_width = 58.0;
@@ -3850,7 +4127,7 @@ fn draw_agenda_hour_grid(
             day_start + time::Duration::days(1)
         } else {
             match target_date.with_hms(hour, 0, 0) {
-                Ok(value) => value.assume_utc(),
+                Ok(value) => value.assume_offset(timezone),
                 Err(_) => continue,
             }
         };
@@ -3869,12 +4146,27 @@ fn draw_agenda_hour_grid(
     }
 }
 
+fn agenda_time_from_y(
+    y: f32,
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+) -> OffsetDateTime {
+    let raw_minutes =
+        ((y - rect.top()) / rect.height() * total_minutes).clamp(0.0, total_minutes - 1.0);
+    let rounded_minutes =
+        ((raw_minutes / 15.0).round() * 15.0).clamp(0.0, total_minutes - 15.0) as i64;
+    day_start + time::Duration::minutes(rounded_minutes)
+}
+
 fn draw_proposed_agenda_block(
     painter: &egui::Painter,
     rect: egui::Rect,
     day_start: OffsetDateTime,
     total_minutes: f32,
     block: &ProposedScheduleBlock,
+    source: &ScheduleBlockSource,
+    timezone: UtcOffset,
     palette: Palette,
 ) {
     let label_width = 58.0;
@@ -3897,11 +4189,12 @@ fn draw_proposed_agenda_block(
         egui::pos2(left, top),
         egui::pos2(right, bottom.max(top + 30.0)),
     );
+    let (fill, stroke, text_color) = proposed_block_colors(source, palette);
     painter.rect(
         block_rect,
         6.0,
-        palette.selected_fill,
-        Stroke::new(1.0, palette.accent),
+        fill,
+        Stroke::new(1.0, stroke),
         egui::StrokeKind::Inside,
     );
     painter.text(
@@ -3909,13 +4202,13 @@ fn draw_proposed_agenda_block(
         egui::Align2::LEFT_TOP,
         format!(
             "{}-{}  {}  {}m",
-            format_hm(block.window.start),
-            format_hm(block.window.end),
+            format_hm_in(block.window.start, timezone),
+            format_hm_in(block.window.end, timezone),
             block.title,
             block.required_minutes
         ),
         egui::FontId::proportional(13.0),
-        palette.text,
+        text_color,
     );
 }
 
@@ -3927,9 +4220,10 @@ fn draw_current_time_repair(
     day_start: OffsetDateTime,
     total_minutes: f32,
     scroll_to_now: bool,
+    timezone: UtcOffset,
     palette: Palette,
 ) -> bool {
-    let now = OffsetDateTime::now_utc();
+    let now = OffsetDateTime::now_utc().to_offset(timezone);
     if now.date() != target_date {
         return false;
     }
@@ -4279,13 +4573,14 @@ fn schedule_calendar_view(
     ui: &mut egui::Ui,
     target_date: Date,
     blocks: &[ScheduleBlock],
+    timezone: UtcOffset,
     palette: Palette,
 ) -> Option<ScheduleAction> {
     let mut action = None;
     ui.horizontal_top(|ui| {
-        schedule_timeline(ui, target_date, blocks, palette);
+        schedule_timeline(ui, target_date, blocks, timezone, palette);
         ui.add_space(12.0);
-        action = schedule_action_panel(ui, blocks, palette);
+        action = schedule_action_panel(ui, blocks, timezone, palette);
     });
     action
 }
@@ -4294,6 +4589,7 @@ fn schedule_month_calendar(
     ui: &mut egui::Ui,
     target_date: Date,
     blocks: &[ScheduleBlock],
+    timezone: UtcOffset,
     palette: Palette,
 ) -> Option<Date> {
     let first_day = match first_day_of_month(target_date) {
@@ -4337,7 +4633,7 @@ fn schedule_month_calendar(
                 let date = cell_date;
                 let day_blocks = blocks
                     .iter()
-                    .filter(|block| block.start_at.date() == date)
+                    .filter(|block| block.start_at.to_offset(timezone).date() == date)
                     .collect::<Vec<_>>();
                 let in_month =
                     date.month() == target_date.month() && date.year() == target_date.year();
@@ -4351,6 +4647,7 @@ fn schedule_month_calendar(
                     &day_blocks,
                     in_month,
                     selected,
+                    timezone,
                     palette,
                 );
                 if response.clicked() {
@@ -4372,6 +4669,7 @@ fn draw_calendar_day_cell(
     blocks: &[&ScheduleBlock],
     in_month: bool,
     selected: bool,
+    timezone: UtcOffset,
     palette: Palette,
 ) {
     let fill = if selected {
@@ -4436,7 +4734,10 @@ fn draw_calendar_day_cell(
         painter.text(
             egui::pos2(rect.left() + 20.0, y),
             egui::Align2::LEFT_TOP,
-            truncate_chars(&format!("{} {}", format_hm(block.start_at), title), 22),
+            truncate_chars(
+                &format!("{} {}", format_hm_in(block.start_at, timezone), title),
+                22,
+            ),
             egui::FontId::proportional(12.0),
             text_color,
         );
@@ -4458,9 +4759,10 @@ fn schedule_timeline(
     ui: &mut egui::Ui,
     target_date: Date,
     blocks: &[ScheduleBlock],
+    timezone: UtcOffset,
     palette: Palette,
 ) {
-    let Ok((day_start, day_end)) = schedule_bounds(target_date, blocks) else {
+    let Ok((day_start, day_end)) = schedule_bounds(target_date, blocks, timezone) else {
         ui.colored_label(palette.error, "Invalid schedule bounds.");
         return;
     };
@@ -4493,7 +4795,7 @@ fn schedule_timeline(
                 let Ok(mark) = target_date.with_hms(hour, 0, 0) else {
                     break;
                 };
-                let mark = mark.assume_utc();
+                let mark = mark.assume_offset(timezone);
                 let y =
                     rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
                 if rect.contains(egui::pos2(content_left, y)) {
@@ -4513,7 +4815,15 @@ fn schedule_timeline(
             }
 
             for block in blocks {
-                draw_schedule_block(&painter, rect, day_start, total_minutes, block, palette);
+                draw_schedule_block(
+                    &painter,
+                    rect,
+                    day_start,
+                    total_minutes,
+                    block,
+                    timezone,
+                    palette,
+                );
             }
         });
 }
@@ -4524,6 +4834,7 @@ fn draw_schedule_block(
     day_start: OffsetDateTime,
     total_minutes: f32,
     block: &ScheduleBlock,
+    timezone: UtcOffset,
     palette: Palette,
 ) {
     let label_width = 58.0;
@@ -4546,7 +4857,7 @@ fn draw_schedule_block(
         egui::pos2(left, top),
         egui::pos2(right, bottom.max(top + 30.0)),
     );
-    let (fill, stroke, text_color) = schedule_block_colors(&block.state, palette);
+    let (fill, stroke, text_color) = schedule_block_colors(block, palette);
     painter.rect(
         block_rect,
         6.0,
@@ -4562,8 +4873,8 @@ fn draw_schedule_block(
     let duration = schedule_block_minutes(block);
     let label = format!(
         "{}-{}  {}  {duration}m",
-        format_hm(block.start_at),
-        format_hm(block.end_at),
+        format_hm_in(block.start_at, timezone),
+        format_hm_in(block.end_at, timezone),
         title
     );
     painter.text(
@@ -4578,6 +4889,7 @@ fn draw_schedule_block(
 fn schedule_action_panel(
     ui: &mut egui::Ui,
     blocks: &[ScheduleBlock],
+    timezone: UtcOffset,
     palette: Palette,
 ) -> Option<ScheduleAction> {
     let mut action = None;
@@ -4601,8 +4913,8 @@ fn schedule_action_panel(
                             ui.horizontal(|ui| {
                                 ui.monospace(format!(
                                     "{}-{}",
-                                    format_hm(block.start_at),
-                                    format_hm(block.end_at)
+                                    format_hm_in(block.start_at, timezone),
+                                    format_hm_in(block.end_at, timezone)
                                 ));
                                 ui.label(format!("{}m", schedule_block_minutes(block)));
                             });
@@ -4651,9 +4963,10 @@ fn schedule_action_panel(
 fn schedule_bounds(
     target_date: Date,
     blocks: &[ScheduleBlock],
+    timezone: UtcOffset,
 ) -> Result<(OffsetDateTime, OffsetDateTime)> {
-    let mut start = target_date.with_hms(9, 0, 0)?.assume_utc();
-    let mut end = target_date.with_hms(17, 0, 0)?.assume_utc();
+    let mut start = target_date.with_hms(9, 0, 0)?.assume_offset(timezone);
+    let mut end = target_date.with_hms(17, 0, 0)?.assume_offset(timezone);
     for block in blocks {
         start = start.min(block.start_at);
         end = end.max(block.end_at);
@@ -4661,18 +4974,35 @@ fn schedule_bounds(
     Ok((start, end))
 }
 
-fn schedule_block_colors(
-    state: &ScheduleBlockState,
-    palette: Palette,
-) -> (Color32, Color32, Color32) {
-    match state {
-        ScheduleBlockState::Proposed => (palette.selected_fill, palette.accent, palette.text),
+fn schedule_block_colors(block: &ScheduleBlock, palette: Palette) -> (Color32, Color32, Color32) {
+    match block.state {
+        ScheduleBlockState::Proposed => proposed_block_colors(&block.source, palette),
         ScheduleBlockState::Scheduled | ScheduleBlockState::Active => {
-            (palette.control_bg, palette.accent, palette.text)
+            if block.source == ScheduleBlockSource::Manual {
+                (palette.control_bg, palette.success, palette.text)
+            } else if block.source == ScheduleBlockSource::Repair {
+                (palette.faint, palette.warning, palette.text)
+            } else {
+                (palette.control_bg, palette.accent, palette.text)
+            }
         }
         ScheduleBlockState::Done => (palette.faint, palette.success, palette.success),
         ScheduleBlockState::Missed => (palette.faint, palette.warning, palette.warning),
         ScheduleBlockState::Cancelled => (palette.faint, palette.border, palette.muted),
+    }
+}
+
+fn proposed_block_colors(
+    source: &ScheduleBlockSource,
+    palette: Palette,
+) -> (Color32, Color32, Color32) {
+    match source {
+        ScheduleBlockSource::Manual => (palette.control_bg, palette.success, palette.text),
+        ScheduleBlockSource::Repair => (palette.faint, palette.warning, palette.text),
+        ScheduleBlockSource::ExternalCalendar => {
+            (palette.faint, palette.border_strong, palette.text)
+        }
+        ScheduleBlockSource::Scheduler => (palette.selected_fill, palette.accent, palette.text),
     }
 }
 
@@ -4841,11 +5171,15 @@ struct DateCandidate {
 }
 
 fn parse_optional_date(value: &str) -> Result<Option<Date>> {
+    parse_optional_date_with_today(value, OffsetDateTime::now_utc().date())
+}
+
+fn parse_optional_date_with_today(value: &str, today: Date) -> Result<Option<Date>> {
     let value = value.trim();
     if value.is_empty() {
         Ok(None)
     } else {
-        parse_flexible_date(value, OffsetDateTime::now_utc().date()).map(Some)
+        parse_flexible_date(value, today).map(Some)
     }
 }
 
@@ -4903,10 +5237,10 @@ fn parse_flexible_date(value: &str, today: Date) -> Result<Date> {
     ))
 }
 
-fn parse_hm_for_date(value: &str, date: Date) -> Result<OffsetDateTime> {
+fn parse_hm_for_date(value: &str, date: Date, timezone: UtcOffset) -> Result<OffsetDateTime> {
     let time = Time::parse(value.trim(), format_description!("[hour]:[minute]"))
         .map_err(|_| anyhow!("時刻は HH:MM で入力してください"))?;
-    Ok(date.with_time(time).assume_utc())
+    Ok(date.with_time(time).assume_offset(timezone))
 }
 
 fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
@@ -4920,8 +5254,8 @@ fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
     }
 }
 
-fn due_date_candidates(input: &str) -> Vec<DateCandidate> {
-    let today = OffsetDateTime::now_utc().date();
+fn due_date_candidates(input: &str, timezone: UtcOffset) -> Vec<DateCandidate> {
+    let today = OffsetDateTime::now_utc().to_offset(timezone).date();
     let query = input.trim().to_ascii_lowercase();
     if is_textual_date_query(&query) {
         let mut candidates = Vec::new();
@@ -5190,16 +5524,20 @@ fn asks_next_action(value: &str) -> bool {
         || value.contains("何する")
 }
 
-fn default_workday_availability(date: Date) -> Result<Vec<mnema_app::AvailabilityWindow>> {
-    let today = OffsetDateTime::now_utc().date();
+fn default_workday_availability(
+    date: Date,
+    timezone: UtcOffset,
+) -> Result<Vec<mnema_app::AvailabilityWindow>> {
+    let now = OffsetDateTime::now_utc().to_offset(timezone);
+    let today = now.date();
     if date < today {
         return Ok(Vec::new());
     }
 
-    let mut start = date.with_hms(9, 0, 0)?.assume_utc();
-    let end = date.with_hms(17, 0, 0)?.assume_utc();
+    let mut start = date.with_hms(9, 0, 0)?.assume_offset(timezone);
+    let end = date.with_hms(17, 0, 0)?.assume_offset(timezone);
     if date == today {
-        start = start.max(OffsetDateTime::now_utc());
+        start = start.max(now);
     }
     if start >= end {
         return Ok(Vec::new());
@@ -5214,6 +5552,10 @@ fn format_hm(value: OffsetDateTime) -> String {
     value
         .format(format_description!("[hour]:[minute]"))
         .unwrap_or_else(|_| value.time().to_string())
+}
+
+fn format_hm_in(value: OffsetDateTime, timezone: UtcOffset) -> String {
+    format_hm(value.to_offset(timezone))
 }
 
 fn schedule_state_label(state: &ScheduleBlockState) -> &'static str {
@@ -5339,5 +5681,37 @@ mod tests {
         assert_eq!(parse_duration_minutes("258m"), Some(258));
         assert_eq!(parse_duration_minutes("01:30"), Some(90));
         assert_eq!(parse_duration_minutes("01:30:01"), Some(91));
+    }
+
+    #[test]
+    fn parses_timezone_offsets() {
+        assert_eq!(
+            parse_timezone_offset("JST").unwrap(),
+            UtcOffset::from_hms(9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            parse_timezone_offset("+09:00").unwrap(),
+            UtcOffset::from_hms(9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            parse_timezone_offset("-05:30").unwrap(),
+            UtcOffset::from_hms(-5, -30, 0).unwrap()
+        );
+        assert_eq!(parse_timezone_offset("UTC").unwrap(), UtcOffset::UTC);
+    }
+
+    #[test]
+    fn rounds_agenda_drop_to_quarter_hour() {
+        let timezone = UtcOffset::from_hms(9, 0, 0).unwrap();
+        let day_start = date!(2026 - 06 - 25)
+            .with_hms(0, 0, 0)
+            .unwrap()
+            .assume_offset(timezone);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 1440.0));
+
+        assert_eq!(
+            format_hm(agenda_time_from_y(548.0, rect, day_start, 1440.0)),
+            "09:15"
+        );
     }
 }

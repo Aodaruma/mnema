@@ -23,7 +23,6 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 現在の役割:
 
-- Vault path の確認。
 - 接続中 backend の確認。
 - Light / Dark mode の切り替え。Material Icons の light / dark アイコンを使う。
 - Refresh によるデータ再読み込み。Material Icons の refresh アイコンを使う。
@@ -102,16 +101,20 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 - status undo / redo: status 変更は `Ctrl+Z` で undo、`Ctrl+Shift+Z` で redo できる。
 - title: タスク名をダブルクリックするとその場で入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
 - due / estimate: クリックするとその場で背景なしの入力欄に変わる。候補は入力欄の下に floating popup として表示する。
+- due / estimate popup: 候補テキストはhover時にポインター表示になり、クリックで即保存する。
 - due: 通常入力時は近辺の日付セレクターをpopup表示し、`today`、`tomorrow`、`tue` など英語入力中は候補リストに切り替える。`YYYY-MM-DD`、`YYYYMMDD`、`YYYY/MM/DD` も解釈する。
 - estimate: `30m`、`1h30m`、`01:30`、`01:30:00`、分数を解釈する。固定値と加算ボタンをpopup内から選べる。
-- Done toggle: 左パネル下部で完了済みタスクを表示できる。直近10件から表示し、必要に応じて追加読み込みする。
+- Done toggle: 左パネル下部の三角アイコンで完了済みタスクを表示できる。直近10件から表示し、必要に応じて追加読み込みする。完了済みタスクにも status button を出し、戻し操作ができる。
 - delete icon: Material Icons を使う。ホバー時に明るくなり、確認後に削除する。
+- Task drag: タスク行を agenda にドラッグすると、ドロップ位置の時刻に manual / locked な ScheduleBlock として保存する。開始時刻は15分単位に丸める。
 - Agenda date: 右パネル上部で対象日を切り替える。
 - Today: すでに当日が表示されている状態でクリックすると、agenda の現在時刻ラインへスクロールする。
+- Home open: Home 表示時は対象日が今日なら現在時刻ライン付近へ自動スクロールする。
 - Plan: 対象日のタスクから agenda に予定案を作り、proposed ScheduleBlock として保存する。既存 proposed block がある場合は置き換え確認を出す。
 - Repair: Plan の横にあるボタン。現在時刻以降を再提案し、結果を自動保存する。
 - Repair icon: 現在時刻ライン右端のアイコン。hover で強調され、クリックすると現在時刻以降を repair する。
 - Schedule result: proposed / unscheduled / issue 件数に加え、issue の内容を短いメッセージとして表示する。
+- Block color: Plan 由来、Repair 由来、Manual 由来の block は agenda 上で色を分ける。
 
 この画面に置かないもの:
 
@@ -247,6 +250,7 @@ ScheduleBlock の状態:
 - Vault path を変更する。
 - SQLite / PostgreSQL backend を選ぶ。
 - SQLite DB path や PostgreSQL URL を設定する。
+- Timezone offset を設定する。既定は JST の `+09:00`。`JST` / `Asia/Tokyo` / `UTC` も入力できる。
 - LLM provider と model を設定する。
 - 設定を保存し、再接続する。
 

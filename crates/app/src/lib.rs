@@ -334,6 +334,23 @@ impl<'a> SchedulePlanStoreService<'a> {
         &self,
         plan: &PlanTodayResult,
     ) -> AppResult<Vec<ScheduleBlock>> {
+        self.save_proposed_plan_with_source(plan, ScheduleBlockSource::Scheduler)
+            .await
+    }
+
+    pub async fn save_repaired_plan(
+        &self,
+        plan: &PlanTodayResult,
+    ) -> AppResult<Vec<ScheduleBlock>> {
+        self.save_proposed_plan_with_source(plan, ScheduleBlockSource::Repair)
+            .await
+    }
+
+    async fn save_proposed_plan_with_source(
+        &self,
+        plan: &PlanTodayResult,
+        source: ScheduleBlockSource,
+    ) -> AppResult<Vec<ScheduleBlock>> {
         let now = OffsetDateTime::now_utc();
         let blocks = plan
             .output
@@ -348,7 +365,7 @@ impl<'a> SchedulePlanStoreService<'a> {
                 block_type: ScheduleBlockType::Task,
                 state: ScheduleBlockState::Proposed,
                 locked: false,
-                source: ScheduleBlockSource::Scheduler,
+                source: source.clone(),
                 required_minutes: Some(block.required_minutes),
                 created_at: now,
                 updated_at: now,
@@ -805,7 +822,8 @@ mod tests {
         ) -> CoreResult<()> {
             let mut stored = self.blocks.lock().unwrap();
             stored.retain(|block| {
-                !(block.source == ScheduleBlockSource::Scheduler
+                !((block.source == ScheduleBlockSource::Scheduler
+                    || block.source == ScheduleBlockSource::Repair)
                     && block.state == ScheduleBlockState::Proposed)
             });
             stored.extend(blocks);
