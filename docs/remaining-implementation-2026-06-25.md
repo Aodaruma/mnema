@@ -13,6 +13,7 @@
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
 - タスク一覧で編集・完了・削除ができる。
 - Today plan を生成し、ScheduleBlock として保存できる。
+- Today repair で scheduled / done / active / locked block を固定し、proposed block を再提案できる。
 - Schedule は日別タイムラインとして表示できる。
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
 - Today plan 保存時、既存 proposed blocks を置き換える前に確認できる。
@@ -64,8 +65,8 @@ PostgreSQL は self-hosted / server 運用向けの任意 backend として残�
 
 ## 次に着手する推奨順
 
-1. Schedule repair mode。
-2. Assistant からの計画修正提案と承認 UI。
-3. Calendar または Gantt の本格ビュー。
-4. AutomationLog の review / undo UI。
+1. Assistant からの計画修正提案と承認 UI。
+2. Calendar または Gantt の本格ビュー。
+3. AutomationLog の review / undo UI。
+4. 週次レビュー生成。
 5. Windows インストーラー、署名、auto-update。
