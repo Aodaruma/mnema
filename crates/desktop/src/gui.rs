@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Align, Color32, Margin, RichText, ScrollArea, Stroke, TextEdit};
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
-    ProposedScheduleBlock, SchedulePlanStoreService,
+    ProposedScheduleBlock, SchedulePlanStoreService, TaskCommandService,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
@@ -33,6 +34,12 @@ enum View {
     Inbox,
     Schedule,
     Settings,
+}
+
+#[derive(Debug, Clone)]
+enum TaskAction {
+    Complete(TaskId),
+    Delete(TaskId),
 }
 
 struct MnemaGuiApp {
@@ -108,8 +115,12 @@ impl MnemaGuiApp {
         };
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
             let mut tasks = task_repo.list_all().await?;
-            tasks.retain(|task| task.deleted_at.is_none());
+            let done_status_ids = done_status_ids(status_repo.as_ref(), &tasks).await?;
+            tasks.retain(|task| {
+                task.deleted_at.is_none() && !done_status_ids.contains(&task.status_id)
+            });
             tasks.sort_by_key(|task| (task.due_date, task.created_at));
             Result::<Vec<Task>>::Ok(tasks)
         });
@@ -120,6 +131,58 @@ impl MnemaGuiApp {
                 self.error = None;
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn complete_task(&mut self, task_id: TaskId) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
+            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
+            Result::<Task>::Ok(service.complete_task(task_id).await?)
+        });
+
+        match result {
+            Ok(task) => {
+                self.message = format!("Completed: {}", task.title);
+                self.error = None;
+                self.refresh_tasks();
+                self.refresh_schedule();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn delete_task(&mut self, task_id: TaskId) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
+            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
+            service.delete_task(task_id).await?;
+            Result::<()>::Ok(())
+        });
+
+        match result {
+            Ok(()) => {
+                self.message = String::from("Task deleted");
+                self.error = None;
+                self.refresh_tasks();
+                self.refresh_schedule();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn handle_task_action(&mut self, action: TaskAction) {
+        match action {
+            TaskAction::Complete(task_id) => self.complete_task(task_id),
+            TaskAction::Delete(task_id) => self.delete_task(task_id),
         }
     }
 
@@ -395,7 +458,9 @@ impl MnemaGuiApp {
 
         ui.separator();
         ui.label(RichText::new("Tasks").strong());
-        task_list(ui, &self.tasks, palette);
+        if let Some(action) = task_list(ui, &self.tasks, palette) {
+            self.handle_task_action(action);
+        }
     }
 
     fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -418,7 +483,9 @@ impl MnemaGuiApp {
             }
         });
         ui.add_space(12.0);
-        task_list(ui, &self.tasks, palette);
+        if let Some(action) = task_list(ui, &self.tasks, palette) {
+            self.handle_task_action(action);
+        }
     }
 
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -756,12 +823,13 @@ fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
     ui.add_space(8.0);
 }
 
-fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) {
+fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) -> Option<TaskAction> {
     if tasks.is_empty() {
         ui.label("No tasks.");
-        return;
+        return None;
     }
 
+    let mut action = None;
     ScrollArea::vertical().show(ui, |ui| {
         for task in tasks {
             ui.horizontal(|ui| {
@@ -772,10 +840,19 @@ fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) {
                 if let Some(minutes) = task.estimated_minutes {
                     ui.label(format!("{minutes}m"));
                 }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Delete").clicked() {
+                        action = Some(TaskAction::Delete(task.id.clone()));
+                    }
+                    if ui.button("Done").clicked() {
+                        action = Some(TaskAction::Complete(task.id.clone()));
+                    }
+                });
             });
             ui.separator();
         }
     });
+    action
 }
 
 fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
@@ -798,6 +875,40 @@ fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
             ui.separator();
         }
     });
+}
+
+async fn done_status_ids(
+    statuses: &dyn StatusRepository,
+    tasks: &[Task],
+) -> Result<HashSet<StatusId>> {
+    let done_group_ids = statuses
+        .list_groups()
+        .await?
+        .into_iter()
+        .filter(|group| group.kind == StatusGroupKind::Done)
+        .map(|group| group.id)
+        .collect::<HashSet<_>>();
+    let mut project_ids = tasks
+        .iter()
+        .filter_map(|task| task.project_id.clone())
+        .collect::<HashSet<_>>();
+    let mut status_ids = HashSet::new();
+
+    for status in statuses.list_statuses_for_project(None).await? {
+        if done_group_ids.contains(&status.group_id) {
+            status_ids.insert(status.id);
+        }
+    }
+
+    for project_id in project_ids.drain() {
+        for status in statuses.list_statuses_for_project(Some(project_id)).await? {
+            if done_group_ids.contains(&status.group_id) {
+                status_ids.insert(status.id);
+            }
+        }
+    }
+
+    Ok(status_ids)
 }
 
 fn parse_optional_date(value: &str) -> Result<Option<Date>> {

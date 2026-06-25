@@ -17,10 +17,14 @@ pub use mnema_scheduler::{
 pub enum AppError {
     #[error("repository error: {0}")]
     Repository(String),
+    #[error("task not found")]
+    TaskNotFound,
     #[error("missing default inbox list")]
     MissingDefaultInbox,
     #[error("missing default task status")]
     MissingDefaultStatus,
+    #[error("missing done task status")]
+    MissingDoneStatus,
     #[error("task title is required")]
     EmptyTaskTitle,
 }
@@ -249,6 +253,38 @@ impl<'a> SchedulePlanStoreService<'a> {
     }
 }
 
+pub struct TaskCommandService<'a> {
+    tasks: &'a dyn TaskRepository,
+    statuses: &'a dyn StatusRepository,
+}
+
+impl<'a> TaskCommandService<'a> {
+    #[must_use]
+    pub fn new(tasks: &'a dyn TaskRepository, statuses: &'a dyn StatusRepository) -> Self {
+        Self { tasks, statuses }
+    }
+
+    pub async fn complete_task(&self, task_id: TaskId) -> AppResult<Task> {
+        let mut task = self
+            .tasks
+            .find(task_id)
+            .await?
+            .filter(|task| task.deleted_at.is_none())
+            .ok_or(AppError::TaskNotFound)?;
+        task.status_id = done_task_status_id(self.statuses, task.project_id.clone()).await?;
+        task.updated_at = OffsetDateTime::now_utc();
+        self.tasks.update(task.clone()).await?;
+        Ok(task)
+    }
+
+    pub async fn delete_task(&self, task_id: TaskId) -> AppResult<()> {
+        self.tasks
+            .soft_delete(task_id, OffsetDateTime::now_utc())
+            .await
+            .map_err(Into::into)
+    }
+}
+
 async fn default_task_status_id(statuses: &dyn StatusRepository) -> AppResult<StatusId> {
     let groups = statuses.list_groups().await?;
     let group_kinds = groups
@@ -275,6 +311,36 @@ async fn default_task_status_id(statuses: &dyn StatusRepository) -> AppResult<St
         })
         .map(|status| status.id.clone())
         .ok_or(AppError::MissingDefaultStatus)
+}
+
+async fn done_task_status_id(
+    statuses: &dyn StatusRepository,
+    project_id: Option<ProjectId>,
+) -> AppResult<StatusId> {
+    let groups = statuses.list_groups().await?;
+    let group_kinds = groups
+        .into_iter()
+        .map(|group| (group.id, group.kind))
+        .collect::<HashMap<_, _>>();
+    let mut scopes = Vec::new();
+    if let Some(project_id) = project_id {
+        scopes.push(Some(project_id));
+    }
+    scopes.push(None);
+
+    for scope in scopes {
+        let candidates = statuses.list_statuses_for_project(scope).await?;
+        if let Some(status) = candidates.iter().find(|status| {
+            matches!(
+                group_kinds.get(&status.group_id),
+                Some(StatusGroupKind::Done)
+            )
+        }) {
+            return Ok(status.id.clone());
+        }
+    }
+
+    Err(AppError::MissingDoneStatus)
 }
 
 fn filter_today_candidates(tasks: Vec<Task>, target_date: Date) -> Vec<Task> {
@@ -391,8 +457,13 @@ mod tests {
                 .cloned())
         }
 
-        async fn update(&self, _task: Task) -> CoreResult<()> {
-            unimplemented!("not needed")
+        async fn update(&self, task: Task) -> CoreResult<()> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(stored) = tasks.iter_mut().find(|stored| stored.id == task.id) else {
+                return Err(CoreError::NotFound);
+            };
+            *stored = task;
+            Ok(())
         }
 
         async fn list_all(&self) -> CoreResult<Vec<Task>> {
@@ -409,10 +480,15 @@ mod tests {
 
         async fn soft_delete(
             &self,
-            _id: TaskId,
-            _deleted_at: time::OffsetDateTime,
+            id: TaskId,
+            deleted_at: time::OffsetDateTime,
         ) -> CoreResult<()> {
-            unimplemented!("not needed")
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id) else {
+                return Err(CoreError::NotFound);
+            };
+            task.deleted_at = Some(deleted_at);
+            Ok(())
         }
     }
 
@@ -675,6 +751,48 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, AppError::EmptyTaskTitle));
+    }
+
+    #[tokio::test]
+    async fn completes_task_with_done_status() {
+        let (statuses, todo_status, done_status) = status_catalog();
+        let task = task(todo_status, "Finish UI", Some(date!(2026 - 06 - 25)));
+        let task_id = task.id.clone();
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(vec![task]),
+        };
+        let service = TaskCommandService::new(&tasks, &statuses);
+
+        let completed = service.complete_task(task_id.clone()).await.unwrap();
+
+        assert_eq!(completed.status_id, done_status);
+        assert_eq!(
+            tasks.find(task_id).await.unwrap().unwrap().status_id,
+            done_status
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_task_with_soft_delete() {
+        let (statuses, todo_status, _) = status_catalog();
+        let task = task(todo_status, "Remove me", Some(date!(2026 - 06 - 25)));
+        let task_id = task.id.clone();
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(vec![task]),
+        };
+        let service = TaskCommandService::new(&tasks, &statuses);
+
+        service.delete_task(task_id.clone()).await.unwrap();
+
+        assert!(
+            tasks
+                .find(task_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_some()
+        );
     }
 
     #[tokio::test]
