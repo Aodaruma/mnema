@@ -50,6 +50,14 @@ pub struct CaptureTaskResult {
     pub task: Task,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateTaskRequest {
+    pub task_id: TaskId,
+    pub title: String,
+    pub due_date: Option<Date>,
+    pub estimated_minutes: Option<u32>,
+}
+
 pub struct CaptureTaskService<'a> {
     tasks: &'a dyn TaskRepository,
     lists: &'a dyn ListRepository,
@@ -272,6 +280,26 @@ impl<'a> TaskCommandService<'a> {
             .filter(|task| task.deleted_at.is_none())
             .ok_or(AppError::TaskNotFound)?;
         task.status_id = done_task_status_id(self.statuses, task.project_id.clone()).await?;
+        task.updated_at = OffsetDateTime::now_utc();
+        self.tasks.update(task.clone()).await?;
+        Ok(task)
+    }
+
+    pub async fn update_task(&self, request: UpdateTaskRequest) -> AppResult<Task> {
+        let title = request.title.trim();
+        if title.is_empty() {
+            return Err(AppError::EmptyTaskTitle);
+        }
+
+        let mut task = self
+            .tasks
+            .find(request.task_id)
+            .await?
+            .filter(|task| task.deleted_at.is_none())
+            .ok_or(AppError::TaskNotFound)?;
+        task.title = title.to_string();
+        task.due_date = request.due_date;
+        task.estimated_minutes = request.estimated_minutes;
         task.updated_at = OffsetDateTime::now_utc();
         self.tasks.update(task.clone()).await?;
         Ok(task)
@@ -769,6 +797,35 @@ mod tests {
         assert_eq!(
             tasks.find(task_id).await.unwrap().unwrap().status_id,
             done_status
+        );
+    }
+
+    #[tokio::test]
+    async fn updates_task_fields() {
+        let (statuses, todo_status, _) = status_catalog();
+        let task = task(todo_status, "Draft", Some(date!(2026 - 06 - 25)));
+        let task_id = task.id.clone();
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(vec![task]),
+        };
+        let service = TaskCommandService::new(&tasks, &statuses);
+
+        let updated = service
+            .update_task(UpdateTaskRequest {
+                task_id: task_id.clone(),
+                title: "  Final title  ".into(),
+                due_date: Some(date!(2026 - 06 - 26)),
+                estimated_minutes: Some(90),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated.title, "Final title");
+        assert_eq!(updated.due_date, Some(date!(2026 - 06 - 26)));
+        assert_eq!(updated.estimated_minutes, Some(90));
+        assert_eq!(
+            tasks.find(task_id).await.unwrap().unwrap().title,
+            "Final title"
         );
     }
 

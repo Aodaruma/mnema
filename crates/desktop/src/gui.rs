@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Align, Color32, Margin, RichText, ScrollArea, Stroke, TextEdit};
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
-    ProposedScheduleBlock, SchedulePlanStoreService, TaskCommandService,
+    ProposedScheduleBlock, SchedulePlanStoreService, TaskCommandService, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
@@ -38,6 +38,7 @@ enum View {
 
 #[derive(Debug, Clone)]
 enum TaskAction {
+    Edit(TaskId),
     Complete(TaskId),
     Delete(TaskId),
 }
@@ -51,6 +52,10 @@ struct MnemaGuiApp {
     task_title: String,
     due_date: String,
     minutes: String,
+    editing_task_id: Option<TaskId>,
+    edit_title: String,
+    edit_due_date: String,
+    edit_minutes: String,
     target_date: String,
     tasks: Vec<Task>,
     plan: Option<PlanTodayResult>,
@@ -76,6 +81,10 @@ impl MnemaGuiApp {
             task_title: String::new(),
             due_date: today.clone(),
             minutes: String::from("45"),
+            editing_task_id: None,
+            edit_title: String::new(),
+            edit_due_date: String::new(),
+            edit_minutes: String::new(),
             target_date: today,
             tasks: Vec::new(),
             plan: None,
@@ -138,6 +147,7 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
+        let completed_task_id = task_id.clone();
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
             let status_repo = vault.status_repo();
@@ -149,6 +159,9 @@ impl MnemaGuiApp {
             Ok(task) => {
                 self.message = format!("Completed: {}", task.title);
                 self.error = None;
+                if self.editing_task_id.as_ref() == Some(&completed_task_id) {
+                    self.clear_task_editor();
+                }
                 self.refresh_tasks();
                 self.refresh_schedule();
             }
@@ -160,6 +173,7 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
+        let deleted_task_id = task_id.clone();
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
             let status_repo = vault.status_repo();
@@ -172,6 +186,9 @@ impl MnemaGuiApp {
             Ok(()) => {
                 self.message = String::from("Task deleted");
                 self.error = None;
+                if self.editing_task_id.as_ref() == Some(&deleted_task_id) {
+                    self.clear_task_editor();
+                }
                 self.refresh_tasks();
                 self.refresh_schedule();
             }
@@ -181,9 +198,90 @@ impl MnemaGuiApp {
 
     fn handle_task_action(&mut self, action: TaskAction) {
         match action {
+            TaskAction::Edit(task_id) => self.start_edit_task(task_id),
             TaskAction::Complete(task_id) => self.complete_task(task_id),
             TaskAction::Delete(task_id) => self.delete_task(task_id),
         }
+    }
+
+    fn start_edit_task(&mut self, task_id: TaskId) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
+            self.set_error(anyhow!("task not found"));
+            return;
+        };
+        self.editing_task_id = Some(task.id.clone());
+        self.edit_title = task.title.clone();
+        self.edit_due_date = task
+            .due_date
+            .map(|date| date.to_string())
+            .unwrap_or_default();
+        self.edit_minutes = task
+            .estimated_minutes
+            .map(|minutes| minutes.to_string())
+            .unwrap_or_default();
+        self.error = None;
+    }
+
+    fn save_task_edit(&mut self) {
+        let Some(task_id) = self.editing_task_id.clone() else {
+            return;
+        };
+        let title = self.edit_title.trim().to_string();
+        if title.is_empty() {
+            self.set_error(anyhow!("task title is required"));
+            return;
+        }
+        let due_date = match parse_optional_date(&self.edit_due_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let estimated_minutes = match parse_optional_u32(&self.edit_minutes) {
+            Ok(minutes) => minutes,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+
+        let result = self.runtime.block_on(async move {
+            let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
+            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
+            Result::<Task>::Ok(
+                service
+                    .update_task(UpdateTaskRequest {
+                        task_id,
+                        title,
+                        due_date,
+                        estimated_minutes,
+                    })
+                    .await?,
+            )
+        });
+
+        match result {
+            Ok(task) => {
+                self.message = format!("Updated: {}", task.title);
+                self.error = None;
+                self.clear_task_editor();
+                self.refresh_tasks();
+                self.refresh_schedule();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn clear_task_editor(&mut self) {
+        self.editing_task_id = None;
+        self.edit_title.clear();
+        self.edit_due_date.clear();
+        self.edit_minutes.clear();
     }
 
     fn refresh_schedule(&mut self) {
@@ -461,6 +559,7 @@ impl MnemaGuiApp {
         if let Some(action) = task_list(ui, &self.tasks, palette) {
             self.handle_task_action(action);
         }
+        self.show_task_editor(ui, palette);
     }
 
     fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -486,6 +585,7 @@ impl MnemaGuiApp {
         if let Some(action) = task_list(ui, &self.tasks, palette) {
             self.handle_task_action(action);
         }
+        self.show_task_editor(ui, palette);
     }
 
     fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -554,6 +654,44 @@ impl MnemaGuiApp {
             ui.label("Backend env");
             ui.monospace("MNEMA_STORAGE_BACKEND");
         });
+    }
+
+    fn show_task_editor(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        if self.editing_task_id.is_none() {
+            return;
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("Edit task").strong().color(palette.section));
+        let mut save = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [340.0, 30.0],
+                TextEdit::singleline(&mut self.edit_title).hint_text("Task title"),
+            );
+            ui.add_sized(
+                [124.0, 30.0],
+                TextEdit::singleline(&mut self.edit_due_date).hint_text("YYYY-MM-DD"),
+            );
+            ui.add_sized(
+                [64.0, 30.0],
+                TextEdit::singleline(&mut self.edit_minutes).hint_text("min"),
+            );
+            if ui.button("Save").clicked() {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+
+        if save {
+            self.save_task_edit();
+        } else if cancel {
+            self.clear_task_editor();
+        }
     }
 }
 
@@ -846,6 +984,9 @@ fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) -> Option<Task
                     }
                     if ui.button("Done").clicked() {
                         action = Some(TaskAction::Complete(task.id.clone()));
+                    }
+                    if ui.button("Edit").clicked() {
+                        action = Some(TaskAction::Edit(task.id.clone()));
                     }
                 });
             });
