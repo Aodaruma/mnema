@@ -10,8 +10,9 @@ use eframe::egui::{
 };
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
-    ProposedScheduleBlock, ScheduleBlockCommandService, SchedulePlanStoreService,
-    TaskCommandService, UpdateScheduleBlockWindowRequest, UpdateTaskRequest,
+    ProposedScheduleBlock, RepairScheduleRequest, RepairScheduleService,
+    ScheduleBlockCommandService, SchedulePlanStoreService, TaskCommandService,
+    UpdateScheduleBlockWindowRequest, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
 use mnema_infra::{
@@ -399,7 +400,9 @@ struct MnemaGuiApp {
     schedule_edit_start: String,
     schedule_edit_end: String,
     confirm_plan_save: bool,
+    confirm_repair_save: bool,
     target_date: String,
+    repair_from_time: String,
     tasks: Vec<Task>,
     projects: Vec<Project>,
     selected_project_id: Option<ProjectId>,
@@ -439,6 +442,7 @@ impl MnemaGuiApp {
         let native_menu_synced_dark_mode = native_menu.as_ref().map(|_| dark_mode);
 
         let today = OffsetDateTime::now_utc().date().to_string();
+        let current_time = format_hm(OffsetDateTime::now_utc());
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
         let mut app = Self {
             runtime,
@@ -473,7 +477,9 @@ impl MnemaGuiApp {
             schedule_edit_start: String::new(),
             schedule_edit_end: String::new(),
             confirm_plan_save: false,
+            confirm_repair_save: false,
             target_date: today.clone(),
+            repair_from_time: current_time,
             tasks: Vec::new(),
             projects: Vec::new(),
             selected_project_id: None,
@@ -1394,9 +1400,97 @@ impl MnemaGuiApp {
             .any(|block| block.state == ScheduleBlockState::Proposed);
         if has_replaceable_proposed {
             self.confirm_plan_save = true;
+            self.confirm_repair_save = false;
             self.message = String::from("Save will replace existing proposed blocks.");
         } else {
             self.plan_today(true);
+        }
+    }
+
+    fn repair_schedule(&mut self, save: bool) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let target_date = match parse_required_date(&self.target_date) {
+            Ok(date) => date,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let repair_from = match parse_hm_for_date(&self.repair_from_time, target_date) {
+            Ok(value) => value,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let availability = match default_workday_availability(target_date) {
+            Ok(availability) => availability,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+
+        let result = self.runtime.block_on(async move {
+            let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
+            let schedule_block_repo = vault.schedule_block_repo();
+            let service = RepairScheduleService::new(
+                task_repo.as_ref(),
+                status_repo.as_ref(),
+                schedule_block_repo.as_ref(),
+            );
+            let repair = service
+                .repair_day(RepairScheduleRequest {
+                    target_date,
+                    repair_from,
+                    availability,
+                })
+                .await?;
+
+            let saved = if save {
+                let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
+                store.save_proposed_plan(&repair.plan).await?.len()
+            } else {
+                0
+            };
+
+            Result::<(mnema_app::RepairScheduleResult, usize)>::Ok((repair, saved))
+        });
+
+        match result {
+            Ok((repair, saved)) => {
+                let block_count = repair.plan.output.blocks.len();
+                let fixed_count = repair.fixed_blocks.len();
+                self.plan = Some(repair.plan);
+                self.message = if save {
+                    format!("Saved repaired plan: {saved} proposed blocks, {fixed_count} fixed")
+                } else {
+                    format!("Repaired {block_count} blocks, kept {fixed_count} fixed")
+                };
+                self.error = None;
+                if save {
+                    self.refresh_schedule();
+                }
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn request_save_repair(&mut self) {
+        self.refresh_schedule();
+        let has_replaceable_proposed = self
+            .schedule
+            .iter()
+            .any(|block| block.state == ScheduleBlockState::Proposed);
+        if has_replaceable_proposed {
+            self.confirm_repair_save = true;
+            self.confirm_plan_save = false;
+            self.message = String::from("Repair save will replace existing proposed blocks.");
+        } else {
+            self.repair_schedule(true);
         }
     }
 
@@ -1615,6 +1709,16 @@ impl MnemaGuiApp {
                 self.request_save_plan();
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Repair from");
+            time_editor(ui, &mut self.repair_from_time);
+            if ui.button("Repair").clicked() {
+                self.repair_schedule(false);
+            }
+            if ui.button("Save repair").clicked() {
+                self.request_save_repair();
+            }
+        });
         if self.confirm_plan_save {
             ui.horizontal(|ui| {
                 ui.colored_label(
@@ -1628,6 +1732,22 @@ impl MnemaGuiApp {
                 if ui.button("Cancel").clicked() {
                     self.confirm_plan_save = false;
                     self.message = String::from("Save cancelled");
+                }
+            });
+        }
+        if self.confirm_repair_save {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    palette.warning,
+                    "Repair will replace existing proposed blocks for this date.",
+                );
+                if ui.button("Replace with repair").clicked() {
+                    self.confirm_repair_save = false;
+                    self.repair_schedule(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_repair_save = false;
+                    self.message = String::from("Repair save cancelled");
                 }
             });
         }

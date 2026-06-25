@@ -143,6 +143,23 @@ pub struct PlanTodayResult {
     pub output: SchedulingOutput,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairScheduleRequest {
+    pub target_date: Date,
+    #[serde(with = "time::serde::rfc3339")]
+    pub repair_from: OffsetDateTime,
+    pub availability: Vec<AvailabilityWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairScheduleResult {
+    pub target_date: Date,
+    #[serde(with = "time::serde::rfc3339")]
+    pub repair_from: OffsetDateTime,
+    pub fixed_blocks: Vec<ScheduleBlock>,
+    pub plan: PlanTodayResult,
+}
+
 pub struct PlanTodayService<'a> {
     tasks: &'a dyn TaskRepository,
     statuses: &'a dyn StatusRepository,
@@ -176,7 +193,7 @@ impl<'a> PlanTodayService<'a> {
         let all_tasks = self.tasks.list_all().await?;
         let tasks = filter_today_candidates(all_tasks, request.target_date);
         let status_groups = self.statuses.list_groups().await?;
-        let statuses = self.statuses_for_tasks(&tasks).await?;
+        let statuses = statuses_for_tasks(self.statuses, &tasks).await?;
 
         let output = if request.availability.is_empty() {
             SchedulingOutput {
@@ -199,27 +216,124 @@ impl<'a> PlanTodayService<'a> {
             output,
         })
     }
+}
 
-    async fn statuses_for_tasks(&self, tasks: &[Task]) -> AppResult<Vec<Status>> {
-        let mut statuses = self.statuses.list_statuses_for_project(None).await?;
-        let mut project_ids = HashSet::new();
+pub struct RepairScheduleService<'a> {
+    tasks: &'a dyn TaskRepository,
+    statuses: &'a dyn StatusRepository,
+    schedule_blocks: &'a dyn ScheduleBlockRepository,
+    scheduler: GreedyScheduler,
+}
 
-        for task in tasks {
-            if let Some(project_id) = &task.project_id {
-                project_ids.insert(project_id.clone());
-            }
+impl<'a> RepairScheduleService<'a> {
+    #[must_use]
+    pub fn new(
+        tasks: &'a dyn TaskRepository,
+        statuses: &'a dyn StatusRepository,
+        schedule_blocks: &'a dyn ScheduleBlockRepository,
+    ) -> Self {
+        Self {
+            tasks,
+            statuses,
+            schedule_blocks,
+            scheduler: GreedyScheduler::default(),
         }
-
-        for project_id in project_ids {
-            statuses.extend(
-                self.statuses
-                    .list_statuses_for_project(Some(project_id))
-                    .await?,
-            );
-        }
-
-        Ok(statuses)
     }
+
+    #[must_use]
+    pub fn with_scheduler(
+        tasks: &'a dyn TaskRepository,
+        statuses: &'a dyn StatusRepository,
+        schedule_blocks: &'a dyn ScheduleBlockRepository,
+        scheduler: GreedyScheduler,
+    ) -> Self {
+        Self {
+            tasks,
+            statuses,
+            schedule_blocks,
+            scheduler,
+        }
+    }
+
+    pub async fn repair_day(
+        &self,
+        request: RepairScheduleRequest,
+    ) -> AppResult<RepairScheduleResult> {
+        let existing_blocks = self
+            .schedule_blocks
+            .list_for_day(request.target_date)
+            .await?;
+        let fixed_blocks = existing_blocks
+            .into_iter()
+            .filter(is_fixed_schedule_block)
+            .collect::<Vec<_>>();
+        let fixed_task_ids = fixed_blocks
+            .iter()
+            .filter_map(|block| block.task_id.clone())
+            .collect::<HashSet<_>>();
+        let busy_blocks = fixed_blocks
+            .iter()
+            .filter_map(|block| busy_block_after(block, request.repair_from))
+            .collect::<Vec<_>>();
+        let availability = availability_after(request.availability, request.repair_from);
+
+        let tasks = filter_today_candidates(self.tasks.list_all().await?, request.target_date)
+            .into_iter()
+            .filter(|task| !fixed_task_ids.contains(&task.id))
+            .collect::<Vec<_>>();
+        let status_groups = self.statuses.list_groups().await?;
+        let statuses = statuses_for_tasks(self.statuses, &tasks).await?;
+
+        let output = if availability.is_empty() {
+            SchedulingOutput {
+                blocks: Vec::new(),
+                unscheduled: tasks.into_iter().map(|task| task.id).collect(),
+                issues: vec![ScheduleIssue::NoAvailability],
+            }
+        } else {
+            self.scheduler.plan(SchedulingInput {
+                tasks,
+                statuses,
+                status_groups,
+                availability,
+                busy_blocks,
+            })
+        };
+
+        Ok(RepairScheduleResult {
+            target_date: request.target_date,
+            repair_from: request.repair_from,
+            fixed_blocks,
+            plan: PlanTodayResult {
+                target_date: request.target_date,
+                output,
+            },
+        })
+    }
+}
+
+async fn statuses_for_tasks(
+    statuses_repo: &dyn StatusRepository,
+    tasks: &[Task],
+) -> AppResult<Vec<Status>> {
+    let mut statuses = statuses_repo.list_statuses_for_project(None).await?;
+    let mut project_ids = HashSet::new();
+
+    for task in tasks {
+        if let Some(project_id) = &task.project_id {
+            project_ids.insert(project_id.clone());
+        }
+    }
+
+    for project_id in project_ids {
+        statuses.extend(
+            statuses_repo
+                .list_statuses_for_project(Some(project_id))
+                .await?,
+        );
+    }
+
+    Ok(statuses)
 }
 
 pub struct SchedulePlanStoreService<'a> {
@@ -441,6 +555,64 @@ fn filter_today_candidates(tasks: Vec<Task>, target_date: Date) -> Vec<Task> {
             (Some(due_date), _) if due_date <= target_date => true,
             (_, Some(start_date)) if start_date <= target_date => true,
             _ => false,
+        })
+        .collect()
+}
+
+fn is_fixed_schedule_block(block: &ScheduleBlock) -> bool {
+    block.locked
+        || block.source == ScheduleBlockSource::ExternalCalendar
+        || matches!(
+            block.state,
+            ScheduleBlockState::Scheduled | ScheduleBlockState::Active | ScheduleBlockState::Done
+        )
+}
+
+fn busy_block_after(block: &ScheduleBlock, repair_from: OffsetDateTime) -> Option<BusyBlock> {
+    if block.end_at <= repair_from {
+        return None;
+    }
+
+    let start = if block.start_at < repair_from {
+        repair_from
+    } else {
+        block.start_at
+    };
+    if start >= block.end_at {
+        return None;
+    }
+
+    Some(BusyBlock {
+        window: TimeWindow::new(start, block.end_at),
+        source: if block.source == ScheduleBlockSource::ExternalCalendar {
+            BusyBlockSource::ExternalCalendar
+        } else if block.locked {
+            BusyBlockSource::LockedSchedule
+        } else {
+            BusyBlockSource::Manual
+        },
+        label: block.title_snapshot.clone(),
+    })
+}
+
+fn availability_after(
+    availability: Vec<AvailabilityWindow>,
+    repair_from: OffsetDateTime,
+) -> Vec<AvailabilityWindow> {
+    availability
+        .into_iter()
+        .filter_map(|availability| {
+            let start = if availability.window.start < repair_from {
+                repair_from
+            } else {
+                availability.window.start
+            };
+            if start >= availability.window.end {
+                return None;
+            }
+            Some(AvailabilityWindow {
+                window: TimeWindow::new(start, availability.window.end),
+            })
         })
         .collect()
 }
@@ -1035,6 +1207,77 @@ mod tests {
         assert_eq!(
             service.list_for_day(plan.target_date).await.unwrap().len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn repairs_proposed_blocks_around_fixed_schedule() {
+        let (statuses, todo_status, _) = status_catalog();
+        let fixed_task = task(
+            todo_status.clone(),
+            "Already scheduled",
+            Some(date!(2026 - 06 - 25)),
+        );
+        let fixed_task_id = fixed_task.id.clone();
+        let repair_task = task(todo_status, "Repair me", Some(date!(2026 - 06 - 25)));
+        let repair_task_id = repair_task.id.clone();
+        let tasks = MemoryTaskRepository {
+            tasks: vec![fixed_task, repair_task],
+        };
+        let schedule_blocks = MemoryScheduleBlockRepository {
+            blocks: Mutex::new(vec![
+                ScheduleBlock {
+                    id: ScheduleBlockId::new(),
+                    task_id: Some(fixed_task_id),
+                    title_snapshot: Some("Already scheduled".into()),
+                    start_at: datetime!(2026-06-25 09:00 UTC),
+                    end_at: datetime!(2026-06-25 09:30 UTC),
+                    block_type: ScheduleBlockType::Task,
+                    state: ScheduleBlockState::Scheduled,
+                    locked: false,
+                    source: ScheduleBlockSource::Scheduler,
+                    required_minutes: Some(30),
+                    created_at: datetime!(2026-06-25 00:00 UTC),
+                    updated_at: datetime!(2026-06-25 00:00 UTC),
+                },
+                ScheduleBlock {
+                    id: ScheduleBlockId::new(),
+                    task_id: Some(repair_task_id.clone()),
+                    title_snapshot: Some("Repair me".into()),
+                    start_at: datetime!(2026-06-25 09:30 UTC),
+                    end_at: datetime!(2026-06-25 10:00 UTC),
+                    block_type: ScheduleBlockType::Task,
+                    state: ScheduleBlockState::Proposed,
+                    locked: false,
+                    source: ScheduleBlockSource::Scheduler,
+                    required_minutes: Some(30),
+                    created_at: datetime!(2026-06-25 00:00 UTC),
+                    updated_at: datetime!(2026-06-25 00:00 UTC),
+                },
+            ]),
+        };
+        let service = RepairScheduleService::new(&tasks, &statuses, &schedule_blocks);
+
+        let result = service
+            .repair_day(RepairScheduleRequest {
+                target_date: date!(2026 - 06 - 25),
+                repair_from: datetime!(2026-06-25 09:30 UTC),
+                availability: vec![AvailabilityWindow {
+                    window: TimeWindow::new(
+                        datetime!(2026-06-25 09:00 UTC),
+                        datetime!(2026-06-25 11:00 UTC),
+                    ),
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.fixed_blocks.len(), 1);
+        assert_eq!(result.plan.output.blocks.len(), 1);
+        assert_eq!(result.plan.output.blocks[0].task_id, repair_task_id);
+        assert_eq!(
+            result.plan.output.blocks[0].window.start,
+            datetime!(2026-06-25 09:30 UTC)
         );
     }
 }
