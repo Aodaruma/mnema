@@ -42,6 +42,7 @@ PostgreSQL を使う場合:
 ## Windows 簡易パッケージ
 
 release build と最小ファイルを `dist\mnema-desktop-windows` にまとめる。
+同梱フォントは `assets\fonts` としてコピーする。
 
 ```powershell
 .\scripts\package-desktop-windows.ps1

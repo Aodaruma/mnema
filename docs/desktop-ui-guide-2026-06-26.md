@@ -25,8 +25,8 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 - Vault path の確認。
 - 接続中 backend の確認。
-- Light / Dark mode の切り替え。
-- Refresh によるデータ再読み込み。
+- Light / Dark mode の切り替え。Material Icons の light / dark アイコンを使う。
+- Refresh によるデータ再読み込み。Material Icons の refresh アイコンを使う。
 
 現状の制限:
 
@@ -51,6 +51,11 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 - バッジ、件数、未読、警告などの状態表示はまだない。
 
+実装メモ:
+
+- Navigation / theme / edit / delete / repair のアイコンには Google Material Icons を同梱して使う。
+- Material Icons は Apache License 2.0。`crates/desktop/assets/fonts/MaterialIcons-Apache-2.0.txt` にライセンス文を置く。
+
 ## Inbox
 
 未整理のタスクを素早く入れる場所。
@@ -65,7 +70,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 - Quick capture: 短い文章からタスク名、期限、見積時間を解釈して追加する。
 - Task title / Due / Estimate: 明示的に入力してタスクを追加する。
-- 一覧上の status / edit / delete: 既存タスクのステータス変更、編集、削除を行う。
+- 一覧上の status / due / estimate / edit / delete: 既存タスクのステータス変更、期限・見積の行内編集、編集、削除を行う。
 
 この画面に置かないもの:
 
@@ -93,10 +98,12 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 主な操作:
 
-- Tasks: 左パネルのタスク一覧。status icon、所属、タスク名、期限、見積を表示する。
-- status icon: クリックして status を選ぶ。Done 系 status を選ぶと完了扱いになる。
-- edit / delete icon: ホバー時に明るくなり、delete は確認後に実行する。
+- Tasks: 左パネルのタスク一覧。status button、所属、タスク名、期限、見積を表示する。
+- status button: 二重丸をクリックして status を選ぶ。メニューは status 名だけを表示し、Done 系 status を選ぶと完了扱いになる。
+- due / estimate: クリックするとその場で背景なしの入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
+- edit / delete icon: Material Icons を使う。ホバー時に明るくなり、delete は確認後に実行する。
 - Agenda date: 右パネル上部で対象日を切り替える。
+- Today: すでに当日が表示されている状態でクリックすると、agenda の現在時刻ラインへスクロールする。
 - Plan: 対象日のタスクから agenda に予定案を作る。まだ保存はしない。
 - Save plan: 表示中の予定案を proposed ScheduleBlock として保存する。
 - Repair icon: 現在時刻ライン右端のアイコン。hover で強調され、クリックすると現在時刻以降を repair する。

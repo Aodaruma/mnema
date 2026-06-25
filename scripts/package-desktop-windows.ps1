@@ -33,6 +33,13 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $OutputDir
 Copy-Item -LiteralPath (Join-Path $repoRoot "README-ja.md") -Destination $OutputDir -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $OutputDir -Force
 
+$assetsSource = Join-Path $repoRoot "crates\desktop\assets"
+if (Test-Path -LiteralPath $assetsSource) {
+    $assetsDest = Join-Path $OutputDir "assets"
+    New-Item -ItemType Directory -Path $assetsDest -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $assetsSource "fonts") -Destination $assetsDest -Recurse -Force
+}
+
 $launcherPath = Join-Path $OutputDir "run-mnema.ps1"
 $launcher = @'
 $ErrorActionPreference = "Stop"

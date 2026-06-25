@@ -69,9 +69,25 @@ enum ProjectViewMode {
 enum TaskAction {
     Edit(TaskId),
     SetStatus(TaskId, StatusId),
+    SaveInlineField(TaskId, TaskInlineField, String),
     RequestDelete(TaskId),
     ConfirmDelete(TaskId),
     CancelDelete,
+    CancelInlineEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TaskInlineField {
+    DueDate,
+    EstimateMinutes,
+}
+
+#[derive(Debug, Clone)]
+struct TaskInlineEdit {
+    task_id: TaskId,
+    field: TaskInlineField,
+    value: String,
+    focus: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,7 +115,24 @@ const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
 const LOGO_FONT_FAMILY: &str = "mnema_logo";
+const MATERIAL_ICON_FONT_FAMILY: &str = "mnema_material_icons";
 const DEFAULT_POSTGRES_URL: &str = "postgres://postgres:postgres@localhost/mnema";
+
+const ICON_ASSISTANT: char = '\u{e39f}';
+const ICON_AUTORENEW: char = '\u{e863}';
+const ICON_CHECK: char = '\u{e5ca}';
+const ICON_CLOSE: char = '\u{e5cd}';
+const ICON_DARK_MODE: char = '\u{e51c}';
+const ICON_DELETE: char = '\u{e872}';
+const ICON_EDIT: char = '\u{e3c9}';
+const ICON_EVENT: char = '\u{e878}';
+const ICON_FOLDER: char = '\u{e2c7}';
+const ICON_HISTORY: char = '\u{e889}';
+const ICON_HOME: char = '\u{e88a}';
+const ICON_INBOX: char = '\u{e156}';
+const ICON_LIGHT_MODE: char = '\u{e518}';
+const ICON_REFRESH: char = '\u{e5d5}';
+const ICON_SETTINGS: char = '\u{e8b8}';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -410,11 +443,13 @@ struct MnemaGuiApp {
     edit_title: String,
     edit_due_date: String,
     edit_minutes: String,
+    inline_task_edit: Option<TaskInlineEdit>,
     editing_schedule_block_id: Option<ScheduleBlockId>,
     schedule_edit_start: String,
     schedule_edit_end: String,
     confirm_plan_save: bool,
     target_date: String,
+    scroll_home_agenda_to_now: bool,
     repair_from_time: String,
     schedule_view_mode: ScheduleViewMode,
     tasks: Vec<Task>,
@@ -493,11 +528,13 @@ impl MnemaGuiApp {
             edit_title: String::new(),
             edit_due_date: String::new(),
             edit_minutes: String::new(),
+            inline_task_edit: None,
             editing_schedule_block_id: None,
             schedule_edit_start: String::new(),
             schedule_edit_end: String::new(),
             confirm_plan_save: false,
             target_date: today.clone(),
+            scroll_home_agenda_to_now: false,
             repair_from_time: current_time,
             schedule_view_mode: ScheduleViewMode::Day,
             tasks: Vec::new(),
@@ -754,6 +791,13 @@ impl MnemaGuiApp {
                 if self.editing_task_id.as_ref() == Some(&deleted_task_id) {
                     self.clear_task_editor();
                 }
+                if self
+                    .inline_task_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.task_id == deleted_task_id)
+                {
+                    self.inline_task_edit = None;
+                }
                 self.refresh_tasks();
                 self.refresh_schedule();
             }
@@ -767,12 +811,16 @@ impl MnemaGuiApp {
             TaskAction::SetStatus(task_id, status_id) => {
                 self.update_task_status(task_id, status_id)
             }
+            TaskAction::SaveInlineField(task_id, field, value) => {
+                self.save_inline_task_field(task_id, field, value)
+            }
             TaskAction::RequestDelete(task_id) => self.confirming_delete_task_id = Some(task_id),
             TaskAction::ConfirmDelete(task_id) => {
                 self.confirming_delete_task_id = None;
                 self.delete_task(task_id);
             }
             TaskAction::CancelDelete => self.confirming_delete_task_id = None,
+            TaskAction::CancelInlineEdit => self.inline_task_edit = None,
         }
     }
 
@@ -791,6 +839,7 @@ impl MnemaGuiApp {
             .estimated_minutes
             .map(|minutes| minutes.to_string())
             .unwrap_or_default();
+        self.inline_task_edit = None;
         self.error = None;
     }
 
@@ -854,6 +903,70 @@ impl MnemaGuiApp {
         self.edit_title.clear();
         self.edit_due_date.clear();
         self.edit_minutes.clear();
+    }
+
+    fn save_inline_task_field(&mut self, task_id: TaskId, field: TaskInlineField, value: String) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id).cloned() else {
+            self.inline_task_edit = None;
+            self.set_error(anyhow!("task not found"));
+            return;
+        };
+
+        let (due_date, estimated_minutes) = match field {
+            TaskInlineField::DueDate => {
+                let due_date = match parse_optional_date(&value) {
+                    Ok(date) => date,
+                    Err(error) => {
+                        self.set_error(error);
+                        return;
+                    }
+                };
+                (due_date, task.estimated_minutes)
+            }
+            TaskInlineField::EstimateMinutes => {
+                let estimated_minutes = match parse_optional_u32(&value) {
+                    Ok(minutes) => minutes,
+                    Err(error) => {
+                        self.set_error(error);
+                        return;
+                    }
+                };
+                (task.due_date, estimated_minutes)
+            }
+        };
+
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let title = task.title.clone();
+
+        let result = self.runtime.block_on(async move {
+            let task_repo = vault.task_repo();
+            let status_repo = vault.status_repo();
+            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
+            Result::<Task>::Ok(
+                service
+                    .update_task(UpdateTaskRequest {
+                        task_id,
+                        title,
+                        due_date,
+                        estimated_minutes,
+                    })
+                    .await?,
+            )
+        });
+
+        match result {
+            Ok(task) => {
+                self.inline_task_edit = None;
+                self.message = format!("Updated: {}", task.title);
+                self.error = None;
+                self.refresh_tasks();
+                self.refresh_schedule();
+                self.refresh_schedule_month();
+            }
+            Err(error) => self.set_error(error),
+        }
     }
 
     fn send_assistant_message(&mut self) {
@@ -1763,7 +1876,7 @@ impl eframe::App for MnemaGuiApp {
                 ui.label(format!("Vault: {}", self.normalized_vault_path().display()));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     theme_toggle(ui, &mut self.dark_mode, palette);
-                    if ui.button("Refresh").clicked() {
+                    if ui.button(format!("{ICON_REFRESH} Refresh")).clicked() {
                         self.refresh_tasks();
                         self.refresh_projects();
                         self.refresh_task_context();
@@ -1790,14 +1903,26 @@ impl eframe::App for MnemaGuiApp {
             .exact_size(168.0)
             .show_inside(ui, |ui| {
                 ui.add_space(12.0);
-                nav_button(ui, &mut self.view, View::Home, "Home");
-                nav_button(ui, &mut self.view, View::Inbox, "Inbox");
-                nav_button(ui, &mut self.view, View::Projects, "Projects");
-                nav_button(ui, &mut self.view, View::Schedule, "Schedule");
-                nav_button(ui, &mut self.view, View::Assistant, "Assistant");
-                nav_button(ui, &mut self.view, View::Activity, "Activity");
+                nav_button(ui, &mut self.view, View::Home, ICON_HOME, "Home");
+                nav_button(ui, &mut self.view, View::Inbox, ICON_INBOX, "Inbox");
+                nav_button(ui, &mut self.view, View::Projects, ICON_FOLDER, "Projects");
+                nav_button(ui, &mut self.view, View::Schedule, ICON_EVENT, "Schedule");
+                nav_button(
+                    ui,
+                    &mut self.view,
+                    View::Assistant,
+                    ICON_ASSISTANT,
+                    "Assistant",
+                );
+                nav_button(ui, &mut self.view, View::Activity, ICON_HISTORY, "Activity");
                 ui.separator();
-                nav_button(ui, &mut self.view, View::Settings, "Settings");
+                nav_button(
+                    ui,
+                    &mut self.view,
+                    View::Settings,
+                    ICON_SETTINGS,
+                    "Settings",
+                );
             });
 
         egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
@@ -1832,6 +1957,7 @@ impl MnemaGuiApp {
         let mut cancel_plan_save = false;
         let mut repair_from_now = false;
         let mut home_date_changed = false;
+        let mut scroll_home_agenda_to_now = false;
 
         ui.columns(2, |columns| {
             columns[0].label(bold_text("Tasks").color(palette.section));
@@ -1845,6 +1971,7 @@ impl MnemaGuiApp {
                 &self.lists,
                 &self.projects,
                 self.confirming_delete_task_id.as_ref(),
+                &mut self.inline_task_edit,
                 palette,
             );
             self.show_task_editor(&mut columns[0], palette);
@@ -1852,8 +1979,12 @@ impl MnemaGuiApp {
             columns[1].horizontal(|ui| {
                 ui.label(bold_text("Agenda").color(palette.section));
                 ui.add_space(12.0);
-                if date_editor(ui, &mut self.target_date) {
+                let date_output = date_editor_with_output(ui, &mut self.target_date);
+                if date_output.changed {
                     home_date_changed = true;
+                }
+                if date_output.today_again {
+                    scroll_home_agenda_to_now = true;
                 }
                 if ui.button("Plan").clicked() {
                     plan = true;
@@ -1885,9 +2016,13 @@ impl MnemaGuiApp {
                 target_date,
                 self.plan.as_ref(),
                 &self.schedule,
+                self.scroll_home_agenda_to_now || scroll_home_agenda_to_now,
                 palette,
             );
         });
+        if self.scroll_home_agenda_to_now || scroll_home_agenda_to_now {
+            self.scroll_home_agenda_to_now = false;
+        }
 
         if let Some(action) = task_action {
             self.handle_task_action(action);
@@ -1954,6 +2089,7 @@ impl MnemaGuiApp {
             &self.lists,
             &self.projects,
             self.confirming_delete_task_id.as_ref(),
+            &mut self.inline_task_edit,
             palette,
         ) {
             self.handle_task_action(action);
@@ -2602,26 +2738,58 @@ fn configure_fonts(ctx: &egui::Context) {
             .insert(FontFamily::Name(LOGO_FONT_FAMILY.into()), vec![font_name]);
     }
 
+    if let Some(font_bytes) = load_material_icons() {
+        let font_name = "material_icons".to_owned();
+        fonts.font_data.insert(
+            font_name.clone(),
+            Arc::new(FontData::from_owned(font_bytes)),
+        );
+        fonts.families.insert(
+            FontFamily::Name(MATERIAL_ICON_FONT_FAMILY.into()),
+            vec![font_name.clone()],
+        );
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.push(font_name);
+        }
+    }
+
     ctx.set_fonts(fonts);
 }
 
 fn load_noto_sans_jp() -> Option<Vec<u8>> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    [
-        manifest_dir.join("assets/fonts/NotoSansJP-VF.ttf"),
-        manifest_dir.join("assets/fonts/NotoSansJP-Regular.ttf"),
-        PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-VF.ttf"),
-        PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-Regular.ttf"),
-    ]
-    .into_iter()
-    .find_map(|path| fs::read(path).ok())
+    let mut candidates = Vec::new();
+    candidates.extend(font_asset_candidates("NotoSansJP-VF.ttf"));
+    candidates.extend(font_asset_candidates("NotoSansJP-Regular.ttf"));
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-VF.ttf"));
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-Regular.ttf"));
+    read_first_file(candidates)
 }
 
 fn load_montserrat() -> Option<Vec<u8>> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    [manifest_dir.join("assets/fonts/Montserrat-VF.ttf")]
-        .into_iter()
-        .find_map(|path| fs::read(path).ok())
+    read_first_file(font_asset_candidates("Montserrat-VF.ttf"))
+}
+
+fn load_material_icons() -> Option<Vec<u8>> {
+    read_first_file(font_asset_candidates("MaterialIcons-Regular.ttf"))
+}
+
+fn font_asset_candidates(file_name: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        paths.push(exe_dir.join("assets/fonts").join(file_name));
+    }
+    paths.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/fonts")
+            .join(file_name),
+    );
+    paths
+}
+
+fn read_first_file(paths: impl IntoIterator<Item = PathBuf>) -> Option<Vec<u8>> {
+    paths.into_iter().find_map(|path| fs::read(path).ok())
 }
 
 fn configure_style(ctx: &egui::Context, dark_factor: f32, dark_mode: bool) {
@@ -2633,10 +2801,11 @@ fn configure_style(ctx: &egui::Context, dark_factor: f32, dark_mode: bool) {
     ctx.set_global_style(style);
 }
 
-fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, label: &str) {
+fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, icon: char, label: &str) {
     let selected = *view == target;
+    let text = RichText::new(format!("{icon}  {label}")).size(14.0);
     if ui
-        .add_sized([140.0, 32.0], egui::Button::selectable(selected, label))
+        .add_sized([140.0, 32.0], egui::Button::selectable(selected, text))
         .clicked()
     {
         *view = target;
@@ -2659,10 +2828,10 @@ fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
             ui.spacing_mut().button_padding = egui::vec2(5.0, 4.0);
             ui.spacing_mut().item_spacing.x = 3.0;
             ui.add_space(3.0);
-            if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
+            if theme_icon_button(ui, !*dark_mode, ICON_LIGHT_MODE, "Light", palette).clicked() {
                 *dark_mode = false;
             }
-            if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
+            if theme_icon_button(ui, *dark_mode, ICON_DARK_MODE, "Dark", palette).clicked() {
                 *dark_mode = true;
             }
         },
@@ -2672,15 +2841,19 @@ fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
 fn theme_icon_button(
     ui: &mut egui::Ui,
     selected: bool,
-    icon: &'static str,
+    icon: char,
     hover_text: &'static str,
     palette: Palette,
 ) -> egui::Response {
-    let text = RichText::new(icon).size(16.0).color(if selected {
-        palette.selected_text
-    } else {
-        palette.text
-    });
+    let text = material_icon_text(
+        icon,
+        18.0,
+        if selected {
+            palette.selected_text
+        } else {
+            palette.text
+        },
+    );
     let mut button = egui::Button::selectable(selected, text).corner_radius(16.0);
     if selected {
         button = button.fill(palette.selected_fill);
@@ -2705,29 +2878,65 @@ fn logo_text(text: impl Into<String>) -> RichText {
         .strong()
 }
 
+fn material_icon_text(icon: char, size: f32, color: Color32) -> RichText {
+    RichText::new(icon.to_string())
+        .family(FontFamily::Name(MATERIAL_ICON_FONT_FAMILY.into()))
+        .size(size)
+        .color(color)
+}
+
+fn material_icon_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, FontFamily::Name(MATERIAL_ICON_FONT_FAMILY.into()))
+}
+
 fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a> {
     TextEdit::singleline(value)
         .hint_text(hint_text)
         .vertical_align(Align::Center)
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct DateEditorOutput {
+    changed: bool,
+    today_again: bool,
+}
+
 fn date_editor(ui: &mut egui::Ui, value: &mut String) -> bool {
-    let mut changed = ui
-        .add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"))
-        .changed();
+    date_editor_with_output(ui, value).changed
+}
+
+fn date_editor_with_output(ui: &mut egui::Ui, value: &mut String) -> DateEditorOutput {
+    let mut output = DateEditorOutput {
+        changed: ui
+            .add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"))
+            .changed(),
+        today_again: false,
+    };
     if ui.button("‹").clicked() {
         shift_date(value, -1);
-        changed = true;
+        output.changed = true;
     }
     if ui.button("Today").clicked() {
-        *value = OffsetDateTime::now_utc().date().to_string();
-        changed = true;
+        let today = OffsetDateTime::now_utc().date().to_string();
+        if value.trim() == today {
+            output.today_again = true;
+        } else {
+            *value = today;
+            output.changed = true;
+        }
     }
     if ui.button("›").clicked() {
         shift_date(value, 1);
-        changed = true;
+        output.changed = true;
     }
-    changed
+    output
+}
+
+fn inline_text_field<'a>(value: &'a mut String, width: f32) -> TextEdit<'a> {
+    TextEdit::singleline(value)
+        .desired_width(width)
+        .vertical_align(Align::Center)
+        .frame(egui::Frame::NONE)
 }
 
 fn shift_date(value: &mut String, days: i64) {
@@ -2937,6 +3146,7 @@ fn task_list(
     lists: &[List],
     projects: &[Project],
     confirming_delete_task_id: Option<&TaskId>,
+    inline_task_edit: &mut Option<TaskInlineEdit>,
     palette: Palette,
 ) -> Option<TaskAction> {
     if tasks.is_empty() {
@@ -2954,7 +3164,7 @@ fn task_list(
                     egui::vec2(ui.available_width(), 62.0),
                     egui::Layout::left_to_right(Align::Center),
                     |ui| {
-                        task_status_combo(
+                        task_status_button(
                             ui,
                             id_salt,
                             task,
@@ -2972,39 +3182,60 @@ fn task_list(
                             );
                             ui.label(bold_text(task.title.as_str()).color(palette.text));
                             ui.horizontal(|ui| {
-                                if let Some(due_date) = task.due_date {
-                                    ui.label(
-                                        regular_text(format!("due {due_date}"))
-                                            .size(12.0)
-                                            .color(palette.due),
-                                    );
-                                }
-                                if let Some(minutes) = task.estimated_minutes {
-                                    ui.label(
-                                        regular_text(format!("{minutes} min"))
-                                            .size(12.0)
-                                            .color(palette.muted),
-                                    );
-                                }
+                                inline_task_meta(
+                                    ui,
+                                    id_salt,
+                                    task,
+                                    TaskInlineField::DueDate,
+                                    task.due_date
+                                        .map(|date| format!("due {date}"))
+                                        .unwrap_or_else(|| "due none".to_string()),
+                                    task.due_date
+                                        .map(|date| date.to_string())
+                                        .unwrap_or_default(),
+                                    92.0,
+                                    palette.due,
+                                    inline_task_edit,
+                                    &mut action,
+                                );
+                                inline_task_meta(
+                                    ui,
+                                    id_salt,
+                                    task,
+                                    TaskInlineField::EstimateMinutes,
+                                    task.estimated_minutes
+                                        .map(|minutes| format!("{minutes} min"))
+                                        .unwrap_or_else(|| "estimate none".to_string()),
+                                    task.estimated_minutes
+                                        .map(|minutes| minutes.to_string())
+                                        .unwrap_or_default(),
+                                    82.0,
+                                    palette.muted,
+                                    inline_task_edit,
+                                    &mut action,
+                                );
                             });
                         });
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             let confirming = confirming_delete_task_id == Some(&task.id);
                             if confirming {
-                                if subtle_icon_button(ui, "✓", "Confirm delete", palette).clicked()
+                                if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
+                                    .clicked()
                                 {
                                     action = Some(TaskAction::ConfirmDelete(task.id.clone()));
                                 }
-                                if subtle_icon_button(ui, "×", "Cancel delete", palette).clicked()
+                                if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
+                                    .clicked()
                                 {
                                     action = Some(TaskAction::CancelDelete);
                                 }
                                 ui.label(regular_text("Delete?").color(palette.warning));
                             } else {
-                                if subtle_icon_button(ui, "×", "Delete", palette).clicked() {
+                                if subtle_icon_button(ui, ICON_DELETE, "Delete", palette).clicked()
+                                {
                                     action = Some(TaskAction::RequestDelete(task.id.clone()));
                                 }
-                                if subtle_icon_button(ui, "✎", "Edit", palette).clicked() {
+                                if subtle_icon_button(ui, ICON_EDIT, "Edit", palette).clicked() {
                                     action = Some(TaskAction::Edit(task.id.clone()));
                                 }
                             }
@@ -3017,7 +3248,7 @@ fn task_list(
     action
 }
 
-fn task_status_combo(
+fn task_status_button(
     ui: &mut egui::Ui,
     id_salt: &'static str,
     task: &Task,
@@ -3030,29 +3261,104 @@ fn task_status_combo(
     let current_kind = current_status
         .and_then(|status| status_group_kind(status, status_groups))
         .unwrap_or(StatusGroupKind::NotStarted);
-    let selected_text = status_icon(&current_kind);
     let candidates = status_candidates(statuses, task.project_id.as_ref());
+    let status_color = task_status_color(&current_kind, palette);
 
-    egui::ComboBox::from_id_salt((id_salt, "status", task.id.clone()))
-        .selected_text(
-            RichText::new(selected_text)
-                .size(18.0)
-                .color(palette.accent),
-        )
-        .width(36.0)
-        .show_ui(ui, |ui| {
+    let button_id = ui.make_persistent_id((id_salt, "status_button", task.id.clone()));
+    let popup_id = button_id.with("popup");
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+    let response = response.on_hover_text(
+        current_status
+            .map(|status| status.name.as_str())
+            .unwrap_or("Status"),
+    );
+
+    let center = rect.center();
+    let outer_radius = if response.hovered() { 11.0 } else { 10.0 };
+    ui.painter().circle_stroke(
+        center,
+        outer_radius,
+        Stroke::new(if response.hovered() { 1.8 } else { 1.3 }, status_color),
+    );
+    ui.painter().circle_filled(center, 4.5, status_color);
+
+    egui::Popup::menu(&response)
+        .id(popup_id)
+        .width(160.0)
+        .show(|ui| {
             for status in candidates {
-                let kind =
-                    status_group_kind(status, status_groups).unwrap_or(StatusGroupKind::NotStarted);
-                let label = format!("{} {}", status_icon(&kind), status.name);
                 if ui
-                    .selectable_label(status.id == task.status_id, label)
+                    .selectable_label(status.id == task.status_id, status.name.as_str())
                     .clicked()
                 {
                     *action = Some(TaskAction::SetStatus(task.id.clone(), status.id.clone()));
+                    egui::Popup::close_id(ui.ctx(), popup_id);
                 }
             }
         });
+}
+
+fn inline_task_meta(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    task: &Task,
+    field: TaskInlineField,
+    display_text: String,
+    edit_value: String,
+    width: f32,
+    color: Color32,
+    inline_task_edit: &mut Option<TaskInlineEdit>,
+    action: &mut Option<TaskAction>,
+) {
+    let is_editing = inline_task_edit
+        .as_ref()
+        .is_some_and(|edit| edit.task_id == task.id && edit.field == field);
+
+    if is_editing {
+        let Some(edit) = inline_task_edit.as_mut() else {
+            return;
+        };
+        let response = ui.add_sized(
+            [width, 20.0],
+            inline_text_field(&mut edit.value, width).id(ui.make_persistent_id((
+                id_salt,
+                "inline",
+                task.id.clone(),
+                field,
+            ))),
+        );
+        if edit.focus {
+            response.request_focus();
+            edit.focus = false;
+        }
+
+        let enter = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let escape = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape {
+            *action = Some(TaskAction::CancelInlineEdit);
+        } else if enter || response.lost_focus() {
+            *action = Some(TaskAction::SaveInlineField(
+                task.id.clone(),
+                field,
+                edit.value.clone(),
+            ));
+        }
+    } else {
+        let response = ui
+            .add(
+                egui::Label::new(regular_text(display_text).size(12.0).color(color))
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text("Click to edit");
+        if response.clicked() {
+            *inline_task_edit = Some(TaskInlineEdit {
+                task_id: task.id.clone(),
+                field,
+                value: edit_value,
+                focus: true,
+            });
+        }
+    }
 }
 
 fn status_candidates<'a>(
@@ -3077,12 +3383,12 @@ fn status_group_kind(status: &Status, status_groups: &[StatusGroup]) -> Option<S
         .map(|group| group.kind.clone())
 }
 
-fn status_icon(kind: &StatusGroupKind) -> &'static str {
+fn task_status_color(kind: &StatusGroupKind, palette: Palette) -> Color32 {
     match kind {
-        StatusGroupKind::NotStarted => "○",
-        StatusGroupKind::InProgress => "◐",
-        StatusGroupKind::Pending => "…",
-        StatusGroupKind::Done => "✓",
+        StatusGroupKind::NotStarted => palette.muted,
+        StatusGroupKind::InProgress => palette.accent,
+        StatusGroupKind::Pending => palette.warning,
+        StatusGroupKind::Done => palette.success,
     }
 }
 
@@ -3108,7 +3414,7 @@ fn task_context_line(task: &Task, lists: &[List], projects: &[Project]) -> Strin
 
 fn subtle_icon_button(
     ui: &mut egui::Ui,
-    icon: &'static str,
+    icon: char,
     hover_text: &'static str,
     palette: Palette,
 ) -> egui::Response {
@@ -3130,8 +3436,8 @@ fn subtle_icon_button(
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(15.0),
+        icon.to_string(),
+        material_icon_font(18.0),
         color,
     );
     response.on_hover_text(hover_text)
@@ -3142,6 +3448,7 @@ fn home_agenda_view(
     target_date: Date,
     plan: Option<&PlanTodayResult>,
     schedule: &[ScheduleBlock],
+    scroll_to_now: bool,
     palette: Palette,
 ) -> bool {
     let proposed_blocks = plan
@@ -3225,6 +3532,7 @@ fn home_agenda_view(
                 target_date,
                 day_start,
                 total_minutes,
+                scroll_to_now,
                 palette,
             ) {
                 repair_clicked = true;
@@ -3328,6 +3636,7 @@ fn draw_current_time_repair(
     target_date: Date,
     day_start: OffsetDateTime,
     total_minutes: f32,
+    scroll_to_now: bool,
     palette: Palette,
 ) -> bool {
     let now = OffsetDateTime::now_utc();
@@ -3361,13 +3670,16 @@ fn draw_current_time_repair(
             egui::Sense::click(),
         )
         .on_hover_text("Repair?");
+    if scroll_to_now {
+        ui.scroll_to_rect(icon_rect, Some(Align::Center));
+    }
     let radius = if response.hovered() { 13.0 } else { 9.0 };
     painter.circle_filled(icon_rect.center(), radius, palette.warning);
     painter.text(
         icon_rect.center(),
         egui::Align2::CENTER_CENTER,
-        "↻",
-        egui::FontId::proportional(if response.hovered() { 18.0 } else { 14.0 }),
+        ICON_AUTORENEW.to_string(),
+        material_icon_font(if response.hovered() { 20.0 } else { 16.0 }),
         palette.surface,
     );
 

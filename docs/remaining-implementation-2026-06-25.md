@@ -11,7 +11,7 @@
 - Projects 画面で Project / List / Milestone を追加・選択できる。
 - Inbox からタスクを追加できる。
 - Quick capture で `tomorrow`、`/due YYYY-MM-DD`、`45m`、`1.5h` などを解釈してタスク化できる。
-- タスク一覧で編集・完了・削除ができる。
+- タスク一覧でステータス変更、期限・見積の行内編集、編集、削除ができる。
 - Home で plan を生成し、ScheduleBlock として保存できる。
 - Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block を再提案できる。
 - Schedule は日別タイムラインとして表示できる。
@@ -27,6 +27,7 @@
 - Light / Dark mode を切り替えられる。
 - Noto Sans JP を優先フォントとして読み込み、通常は wght=400、強調箇所は wght=700 を指定している。
 - 左上ロゴには Montserrat を同梱して使う。
+- Navigation、theme、edit、delete、repair などの UI アイコンには Apache License 2.0 の Google Material Icons を同梱して使う。
 - muda によるネイティブメニューバーの足場がある。
 - `scripts/dev-desktop.ps1` で GUI を起動できる。
 - `scripts/package-desktop-windows.ps1` で Windows 向け簡易パッケージを作れる。
