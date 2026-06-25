@@ -72,6 +72,7 @@ pub trait StatusRepository: Send + Sync {
 pub trait ScheduleBlockRepository: Send + Sync {
     async fn insert(&self, block: ScheduleBlock) -> CoreResult<()>;
     async fn find(&self, id: ScheduleBlockId) -> CoreResult<Option<ScheduleBlock>>;
+    async fn update(&self, block: ScheduleBlock) -> CoreResult<()>;
     async fn list_for_day(&self, day: Date) -> CoreResult<Vec<ScheduleBlock>>;
     async fn replace_proposed_for_day(
         &self,

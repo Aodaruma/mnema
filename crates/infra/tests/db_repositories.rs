@@ -163,10 +163,20 @@ async fn schedule_block_replace_and_list_for_day() -> anyhow::Result<()> {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].title_snapshot, block.title_snapshot);
 
+    let mut updated = blocks[0].clone();
+    updated.state = ScheduleBlockState::Scheduled;
+    updated.locked = true;
+    updated.updated_at = utc_now();
+    repo.update(updated.clone()).await?;
+    let fetched = repo.find(updated.id.clone()).await?.expect("updated block");
+    assert_eq!(fetched.state, ScheduleBlockState::Scheduled);
+    assert!(fetched.locked);
+
     repo.replace_proposed_for_day(target_date, Vec::new())
         .await?;
     let blocks = repo.list_for_day(target_date).await?;
-    assert!(blocks.is_empty());
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].state, ScheduleBlockState::Scheduled);
 
     Ok(())
 }

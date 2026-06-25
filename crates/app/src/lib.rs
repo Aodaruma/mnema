@@ -19,6 +19,8 @@ pub enum AppError {
     Repository(String),
     #[error("task not found")]
     TaskNotFound,
+    #[error("schedule block not found")]
+    ScheduleBlockNotFound,
     #[error("missing default inbox list")]
     MissingDefaultInbox,
     #[error("missing default task status")]
@@ -313,6 +315,33 @@ impl<'a> TaskCommandService<'a> {
     }
 }
 
+pub struct ScheduleBlockCommandService<'a> {
+    schedule_blocks: &'a dyn ScheduleBlockRepository,
+}
+
+impl<'a> ScheduleBlockCommandService<'a> {
+    #[must_use]
+    pub fn new(schedule_blocks: &'a dyn ScheduleBlockRepository) -> Self {
+        Self { schedule_blocks }
+    }
+
+    pub async fn update_state(
+        &self,
+        block_id: ScheduleBlockId,
+        state: ScheduleBlockState,
+    ) -> AppResult<ScheduleBlock> {
+        let mut block = self
+            .schedule_blocks
+            .find(block_id)
+            .await?
+            .ok_or(AppError::ScheduleBlockNotFound)?;
+        block.state = state;
+        block.updated_at = OffsetDateTime::now_utc();
+        self.schedule_blocks.update(block.clone()).await?;
+        Ok(block)
+    }
+}
+
 async fn default_task_status_id(statuses: &dyn StatusRepository) -> AppResult<StatusId> {
     let groups = statuses.list_groups().await?;
     let group_kinds = groups
@@ -566,6 +595,15 @@ mod tests {
                 .iter()
                 .find(|block| block.id == id)
                 .cloned())
+        }
+
+        async fn update(&self, block: ScheduleBlock) -> CoreResult<()> {
+            let mut blocks = self.blocks.lock().unwrap();
+            let Some(stored) = blocks.iter_mut().find(|stored| stored.id == block.id) else {
+                return Err(CoreError::NotFound);
+            };
+            *stored = block;
+            Ok(())
         }
 
         async fn list_for_day(&self, _day: Date) -> CoreResult<Vec<ScheduleBlock>> {
@@ -849,6 +887,40 @@ mod tests {
                 .unwrap()
                 .deleted_at
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn updates_schedule_block_state() {
+        let block = ScheduleBlock {
+            id: ScheduleBlockId::new(),
+            task_id: None,
+            title_snapshot: Some("Plan".into()),
+            start_at: datetime!(2026-06-25 09:00 UTC),
+            end_at: datetime!(2026-06-25 09:30 UTC),
+            block_type: ScheduleBlockType::Task,
+            state: ScheduleBlockState::Proposed,
+            locked: false,
+            source: ScheduleBlockSource::Scheduler,
+            required_minutes: Some(30),
+            created_at: datetime!(2026-06-25 00:00 UTC),
+            updated_at: datetime!(2026-06-25 00:00 UTC),
+        };
+        let block_id = block.id.clone();
+        let schedule_blocks = MemoryScheduleBlockRepository {
+            blocks: Mutex::new(vec![block]),
+        };
+        let service = ScheduleBlockCommandService::new(&schedule_blocks);
+
+        let updated = service
+            .update_state(block_id.clone(), ScheduleBlockState::Scheduled)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.state, ScheduleBlockState::Scheduled);
+        assert_eq!(
+            schedule_blocks.find(block_id).await.unwrap().unwrap().state,
+            ScheduleBlockState::Scheduled
         );
     }
 

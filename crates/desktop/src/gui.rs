@@ -10,7 +10,8 @@ use eframe::egui::{
 };
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
-    ProposedScheduleBlock, SchedulePlanStoreService, TaskCommandService, UpdateTaskRequest,
+    ProposedScheduleBlock, ScheduleBlockCommandService, SchedulePlanStoreService,
+    TaskCommandService, UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
 use mnema_infra::db::{StorageBackend, Vault};
@@ -46,6 +47,11 @@ enum TaskAction {
     Edit(TaskId),
     Complete(TaskId),
     Delete(TaskId),
+}
+
+#[derive(Debug, Clone)]
+enum ScheduleAction {
+    SetState(ScheduleBlockId, ScheduleBlockState),
 }
 
 const INPUT_HEIGHT: f32 = 34.0;
@@ -317,6 +323,44 @@ impl MnemaGuiApp {
                 self.error = None;
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn update_schedule_block_state(
+        &mut self,
+        block_id: ScheduleBlockId,
+        state: ScheduleBlockState,
+    ) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let result = self.runtime.block_on(async move {
+            let schedule_block_repo = vault.schedule_block_repo();
+            let service = ScheduleBlockCommandService::new(schedule_block_repo.as_ref());
+            Result::<ScheduleBlock>::Ok(service.update_state(block_id, state).await?)
+        });
+
+        match result {
+            Ok(block) => {
+                self.message = format!(
+                    "Updated block: {}",
+                    block
+                        .title_snapshot
+                        .as_deref()
+                        .unwrap_or("(untitled block)")
+                );
+                self.error = None;
+                self.refresh_schedule();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn handle_schedule_action(&mut self, action: ScheduleAction) {
+        match action {
+            ScheduleAction::SetState(block_id, state) => {
+                self.update_schedule_block_state(block_id, state)
+            }
         }
     }
 
@@ -621,27 +665,9 @@ impl MnemaGuiApp {
             return;
         }
 
-        ScrollArea::vertical().show(ui, |ui| {
-            for block in &self.schedule {
-                ui.horizontal(|ui| {
-                    ui.monospace(format!(
-                        "{}-{}",
-                        format_hm(block.start_at),
-                        format_hm(block.end_at)
-                    ));
-                    ui.label(
-                        block
-                            .title_snapshot
-                            .as_deref()
-                            .unwrap_or("(untitled block)"),
-                    );
-                    ui.label(
-                        RichText::new(schedule_state_label(&block.state)).color(palette.success),
-                    );
-                });
-                ui.separator();
-            }
-        });
+        if let Some(action) = saved_schedule_list(ui, &self.schedule, palette) {
+            self.handle_schedule_action(action);
+        }
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
@@ -1084,6 +1110,57 @@ fn block_list(ui: &mut egui::Ui, blocks: &[ProposedScheduleBlock]) {
             ui.separator();
         }
     });
+}
+
+fn saved_schedule_list(
+    ui: &mut egui::Ui,
+    blocks: &[ScheduleBlock],
+    palette: Palette,
+) -> Option<ScheduleAction> {
+    let mut action = None;
+    ScrollArea::vertical().show(ui, |ui| {
+        for block in blocks {
+            ui.horizontal(|ui| {
+                ui.monospace(format!(
+                    "{}-{}",
+                    format_hm(block.start_at),
+                    format_hm(block.end_at)
+                ));
+                ui.label(
+                    block
+                        .title_snapshot
+                        .as_deref()
+                        .unwrap_or("(untitled block)"),
+                );
+                ui.label(RichText::new(schedule_state_label(&block.state)).color(palette.success));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if block.state != ScheduleBlockState::Cancelled && ui.button("Cancel").clicked()
+                    {
+                        action = Some(ScheduleAction::SetState(
+                            block.id.clone(),
+                            ScheduleBlockState::Cancelled,
+                        ));
+                    }
+                    if block.state != ScheduleBlockState::Done && ui.button("Done").clicked() {
+                        action = Some(ScheduleAction::SetState(
+                            block.id.clone(),
+                            ScheduleBlockState::Done,
+                        ));
+                    }
+                    if block.state == ScheduleBlockState::Proposed
+                        && ui.button("Schedule").clicked()
+                    {
+                        action = Some(ScheduleAction::SetState(
+                            block.id.clone(),
+                            ScheduleBlockState::Scheduled,
+                        ));
+                    }
+                });
+            });
+            ui.separator();
+        }
+    });
+    action
 }
 
 async fn done_status_ids(

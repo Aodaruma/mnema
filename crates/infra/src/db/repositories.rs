@@ -852,6 +852,10 @@ impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
             .map_err(map_storage_err)
     }
 
+    async fn update(&self, block: ScheduleBlock) -> CoreResult<()> {
+        update_schedule_block(&self.pool, block).await
+    }
+
     async fn list_for_day(&self, day: Date) -> CoreResult<Vec<ScheduleBlock>> {
         let (start, end) = day_bounds(day).map_err(map_storage_err)?;
         let rows = sqlx::query(
@@ -930,6 +934,45 @@ async fn insert_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResul
     .execute(pool)
     .await
     .map_err(map_storage_err)?;
+    Ok(())
+}
+
+async fn update_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResult<()> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE schedule_blocks SET
+            task_id = $1,
+            title_snapshot = $2,
+            start_at = $3,
+            end_at = $4,
+            block_type = $5,
+            state = $6,
+            locked = $7,
+            source = $8,
+            required_minutes = $9,
+            created_at = $10,
+            updated_at = $11
+        WHERE id = $12
+    "#,
+    )
+    .bind(block.task_id.map(|id| id.0))
+    .bind(block.title_snapshot)
+    .bind(block.start_at)
+    .bind(block.end_at)
+    .bind(schedule_block_type_to_str(&block.block_type))
+    .bind(schedule_block_state_to_str(&block.state))
+    .bind(block.locked)
+    .bind(schedule_block_source_to_str(&block.source))
+    .bind(block.required_minutes.map(i64::from))
+    .bind(block.created_at)
+    .bind(block.updated_at)
+    .bind(block.id.0)
+    .execute(pool)
+    .await
+    .map_err(map_storage_err)?;
+    if rows.rows_affected() == 0 {
+        return Err(CoreError::NotFound);
+    }
     Ok(())
 }
 
@@ -1769,6 +1812,10 @@ impl ScheduleBlockRepository for SqliteScheduleBlockRepository {
             .map_err(map_storage_err)
     }
 
+    async fn update(&self, block: ScheduleBlock) -> CoreResult<()> {
+        update_schedule_block_sqlite(&self.pool, block).await
+    }
+
     async fn list_for_day(&self, day: Date) -> CoreResult<Vec<ScheduleBlock>> {
         let (start, end) = day_bounds(day).map_err(map_storage_err)?;
         let rows = sqlx::query(
@@ -1847,6 +1894,45 @@ async fn insert_schedule_block_sqlite(pool: &SqlitePool, block: ScheduleBlock) -
     .execute(pool)
     .await
     .map_err(map_storage_err)?;
+    Ok(())
+}
+
+async fn update_schedule_block_sqlite(pool: &SqlitePool, block: ScheduleBlock) -> CoreResult<()> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE schedule_blocks SET
+            task_id = ?,
+            title_snapshot = ?,
+            start_at = ?,
+            end_at = ?,
+            block_type = ?,
+            state = ?,
+            locked = ?,
+            source = ?,
+            required_minutes = ?,
+            created_at = ?,
+            updated_at = ?
+        WHERE id = ?
+    "#,
+    )
+    .bind(block.task_id.map(|id| id.0.to_string()))
+    .bind(block.title_snapshot)
+    .bind(to_rfc3339(block.start_at).map_err(map_storage_err)?)
+    .bind(to_rfc3339(block.end_at).map_err(map_storage_err)?)
+    .bind(schedule_block_type_to_str(&block.block_type))
+    .bind(schedule_block_state_to_str(&block.state))
+    .bind(if block.locked { 1 } else { 0 })
+    .bind(schedule_block_source_to_str(&block.source))
+    .bind(block.required_minutes.map(i64::from))
+    .bind(to_rfc3339(block.created_at).map_err(map_storage_err)?)
+    .bind(to_rfc3339(block.updated_at).map_err(map_storage_err)?)
+    .bind(block.id.0.to_string())
+    .execute(pool)
+    .await
+    .map_err(map_storage_err)?;
+    if rows.rows_affected() == 0 {
+        return Err(CoreError::NotFound);
+    }
     Ok(())
 }
 
