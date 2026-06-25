@@ -139,6 +139,24 @@ cargo run -p mnema-desktop -- --demo-plan
 cargo run -p mnema-desktop
 ```
 
+Windows では、開発用ランチャーからも起動できる:
+
+```powershell
+.\scripts\dev-desktop.ps1
+```
+
+簡易 release フォルダを作る場合:
+
+```powershell
+.\scripts\package-desktop-windows.ps1
+```
+
+作成後は以下で起動する:
+
+```powershell
+.\dist\mnema-desktop-windows\run-mnema.ps1
+```
+
 既定の SQLite backend で試す場合:
 
 ```bash
@@ -175,6 +193,7 @@ mnema/
 
 - 設計・仕様（ドラフト）:
   - `docs/specification-v0.1.md`
+  - `docs/desktop-runbook-2026-06-26.md`
 
 今後、API・UI フロー・同期仕様などの詳細ドキュメントを追加していく予定。
 

@@ -161,6 +161,25 @@ Launch the current desktop GUI:
 cargo run -p mnema-desktop
 ```
 
+On Windows, the development launcher gives the same GUI flow without remembering
+the cargo arguments:
+
+```powershell
+.\scripts\dev-desktop.ps1
+```
+
+Create a simple release folder:
+
+```powershell
+.\scripts\package-desktop-windows.ps1
+```
+
+Then run:
+
+```powershell
+.\dist\mnema-desktop-windows\run-mnema.ps1
+```
+
 With the default SQLite backend:
 
 ```bash
@@ -198,6 +217,7 @@ mnema/
 * Design / specification (early draft):
 
   * `docs/specification-v0.1.md`
+  * `docs/desktop-runbook-2026-06-26.md`
 
 More detailed docs (API, UI flows, etc.) will be added as the project evolves.
 
