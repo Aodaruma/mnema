@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use eframe::egui::{self, Align, Color32, RichText, ScrollArea, TextEdit};
+use eframe::egui::{self, Align, Color32, RichText, ScrollArea, Stroke, TextEdit};
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
     ProposedScheduleBlock, SchedulePlanStoreService,
@@ -50,11 +50,13 @@ struct MnemaGuiApp {
     schedule: Vec<ScheduleBlock>,
     message: String,
     error: Option<String>,
+    dark_mode: bool,
 }
 
 impl MnemaGuiApp {
     fn new(cc: &eframe::CreationContext<'_>, initial_vault_path: PathBuf) -> Self {
-        configure_style(&cc.egui_ctx);
+        let dark_mode = cc.egui_ctx.theme() == egui::Theme::Dark;
+        configure_style(&cc.egui_ctx, if dark_mode { 1.0 } else { 0.0 });
 
         let today = OffsetDateTime::now_utc().date().to_string();
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
@@ -73,6 +75,7 @@ impl MnemaGuiApp {
             schedule: Vec::new(),
             message: String::new(),
             error: None,
+            dark_mode,
         };
         app.connect_and_refresh();
         app
@@ -293,13 +296,25 @@ impl MnemaGuiApp {
 
 impl eframe::App for MnemaGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let dark_factor = ui.ctx().animate_bool_with_time(
+            egui::Id::new("mnema_theme_transition"),
+            self.dark_mode,
+            0.28,
+        );
+        configure_style(ui.ctx(), dark_factor);
+        if (0.0..1.0).contains(&dark_factor) {
+            ui.ctx().request_repaint();
+        }
+        let palette = Palette::at(dark_factor);
+
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("Mnema").color(Color32::from_rgb(24, 35, 53)));
+                ui.heading(RichText::new("Mnema").color(palette.brand));
                 ui.add_space(12.0);
                 ui.label(format!("Vault: {}", self.normalized_vault_path().display()));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    theme_toggle(ui, &mut self.dark_mode, palette);
                     if ui.button("Refresh").clicked() {
                         self.refresh_tasks();
                         self.refresh_schedule();
@@ -332,7 +347,7 @@ impl eframe::App for MnemaGuiApp {
         egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
             ui.add_space(6.0);
             if let Some(error) = &self.error {
-                ui.colored_label(Color32::from_rgb(176, 48, 48), error);
+                ui.colored_label(palette.error, error);
             } else {
                 ui.label(&self.message);
             }
@@ -340,17 +355,17 @@ impl eframe::App for MnemaGuiApp {
         });
 
         egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
-            View::Today => self.show_today(ui),
-            View::Inbox => self.show_inbox(ui),
-            View::Schedule => self.show_schedule(ui),
-            View::Settings => self.show_settings(ui),
+            View::Today => self.show_today(ui, palette),
+            View::Inbox => self.show_inbox(ui, palette),
+            View::Schedule => self.show_schedule(ui, palette),
+            View::Settings => self.show_settings(ui, palette),
         });
     }
 }
 
 impl MnemaGuiApp {
-    fn show_today(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Today");
+    fn show_today(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Today", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
             ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut self.target_date));
@@ -366,7 +381,7 @@ impl MnemaGuiApp {
         if let Some(plan) = &self.plan {
             if !plan.output.issues.is_empty() {
                 ui.colored_label(
-                    Color32::from_rgb(145, 92, 24),
+                    palette.warning,
                     format!("Issues: {}", plan.output.issues.len()),
                 );
             }
@@ -380,11 +395,11 @@ impl MnemaGuiApp {
 
         ui.separator();
         ui.label(RichText::new("Tasks").strong());
-        task_list(ui, &self.tasks);
+        task_list(ui, &self.tasks, palette);
     }
 
-    fn show_inbox(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Inbox");
+    fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Inbox", palette);
         ui.horizontal(|ui| {
             ui.add_sized(
                 [340.0, 30.0],
@@ -403,11 +418,11 @@ impl MnemaGuiApp {
             }
         });
         ui.add_space(12.0);
-        task_list(ui, &self.tasks);
+        task_list(ui, &self.tasks, palette);
     }
 
-    fn show_schedule(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Schedule");
+    fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Schedule", palette);
         ui.horizontal(|ui| {
             ui.label("Date");
             ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut self.target_date));
@@ -437,8 +452,7 @@ impl MnemaGuiApp {
                             .unwrap_or("(untitled block)"),
                     );
                     ui.label(
-                        RichText::new(schedule_state_label(&block.state))
-                            .color(Color32::from_rgb(34, 112, 83)),
+                        RichText::new(schedule_state_label(&block.state)).color(palette.success),
                     );
                 });
                 ui.separator();
@@ -446,8 +460,8 @@ impl MnemaGuiApp {
         });
     }
 
-    fn show_settings(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Settings");
+    fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        section_header(ui, "Settings", palette);
         ui.horizontal(|ui| {
             ui.label("Vault");
             ui.add_sized([520.0, 30.0], TextEdit::singleline(&mut self.vault_path));
@@ -476,14 +490,150 @@ impl MnemaGuiApp {
     }
 }
 
-fn configure_style(ctx: &egui::Context) {
-    let mut style = (*ctx.global_style()).clone();
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    text: Color32,
+    muted: Color32,
+    brand: Color32,
+    section: Color32,
+    panel: Color32,
+    surface: Color32,
+    faint: Color32,
+    input: Color32,
+    code_bg: Color32,
+    control_bg: Color32,
+    control_hover: Color32,
+    control_active: Color32,
+    border: Color32,
+    border_strong: Color32,
+    accent: Color32,
+    selected_fill: Color32,
+    selected_text: Color32,
+    warning: Color32,
+    success: Color32,
+    due: Color32,
+    error: Color32,
+}
+
+impl Palette {
+    fn at(dark_factor: f32) -> Self {
+        let t = dark_factor.clamp(0.0, 1.0);
+        Self {
+            text: mix_color(
+                Color32::from_rgb(28, 36, 50),
+                Color32::from_rgb(229, 234, 241),
+                t,
+            ),
+            muted: mix_color(
+                Color32::from_rgb(89, 101, 117),
+                Color32::from_rgb(148, 160, 178),
+                t,
+            ),
+            brand: mix_color(
+                Color32::from_rgb(24, 35, 53),
+                Color32::from_rgb(238, 242, 248),
+                t,
+            ),
+            section: mix_color(
+                Color32::from_rgb(31, 42, 68),
+                Color32::from_rgb(218, 226, 238),
+                t,
+            ),
+            panel: mix_color(
+                Color32::from_rgb(246, 248, 251),
+                Color32::from_rgb(20, 26, 36),
+                t,
+            ),
+            surface: mix_color(
+                Color32::from_rgb(255, 255, 255),
+                Color32::from_rgb(16, 21, 30),
+                t,
+            ),
+            faint: mix_color(
+                Color32::from_rgb(235, 240, 246),
+                Color32::from_rgb(27, 36, 50),
+                t,
+            ),
+            input: mix_color(
+                Color32::from_rgb(255, 255, 255),
+                Color32::from_rgb(12, 17, 24),
+                t,
+            ),
+            code_bg: mix_color(
+                Color32::from_rgb(238, 242, 246),
+                Color32::from_rgb(27, 34, 46),
+                t,
+            ),
+            control_bg: mix_color(
+                Color32::from_rgb(246, 249, 252),
+                Color32::from_rgb(28, 37, 50),
+                t,
+            ),
+            control_hover: mix_color(
+                Color32::from_rgb(226, 234, 241),
+                Color32::from_rgb(41, 53, 70),
+                t,
+            ),
+            control_active: mix_color(
+                Color32::from_rgb(44, 110, 157),
+                Color32::from_rgb(82, 146, 191),
+                t,
+            ),
+            border: mix_color(
+                Color32::from_rgb(215, 222, 232),
+                Color32::from_rgb(51, 63, 80),
+                t,
+            ),
+            border_strong: mix_color(
+                Color32::from_rgb(186, 197, 212),
+                Color32::from_rgb(82, 97, 119),
+                t,
+            ),
+            accent: mix_color(
+                Color32::from_rgb(44, 110, 157),
+                Color32::from_rgb(95, 170, 220),
+                t,
+            ),
+            selected_fill: mix_color(
+                Color32::from_rgb(218, 235, 247),
+                Color32::from_rgb(35, 66, 91),
+                t,
+            ),
+            selected_text: mix_color(
+                Color32::from_rgb(17, 42, 63),
+                Color32::from_rgb(242, 248, 252),
+                t,
+            ),
+            warning: mix_color(
+                Color32::from_rgb(145, 92, 24),
+                Color32::from_rgb(232, 164, 76),
+                t,
+            ),
+            success: mix_color(
+                Color32::from_rgb(34, 112, 83),
+                Color32::from_rgb(103, 202, 159),
+                t,
+            ),
+            due: mix_color(
+                Color32::from_rgb(122, 74, 32),
+                Color32::from_rgb(219, 160, 91),
+                t,
+            ),
+            error: mix_color(
+                Color32::from_rgb(176, 48, 48),
+                Color32::from_rgb(245, 116, 116),
+                t,
+            ),
+        }
+    }
+}
+
+fn configure_style(ctx: &egui::Context, dark_factor: f32) {
+    let palette = Palette::at(dark_factor);
+    let mut style = egui::Theme::from_dark_mode(dark_factor >= 0.5).default_style();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.visuals = egui::Visuals::light();
-    style.visuals.selection.bg_fill = Color32::from_rgb(44, 110, 157);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(44, 110, 157);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(226, 234, 241);
+    style.visuals = themed_visuals(palette, dark_factor);
     ctx.set_global_style(style);
 }
 
@@ -497,13 +647,102 @@ fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, label: &str) {
     }
 }
 
-fn section_header(ui: &mut egui::Ui, title: &str) {
+fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if theme_icon_button(ui, !*dark_mode, "☀", "Light", palette).clicked() {
+            *dark_mode = false;
+            ui.ctx().set_theme(egui::Theme::Light);
+        }
+        if theme_icon_button(ui, *dark_mode, "🌙", "Dark", palette).clicked() {
+            *dark_mode = true;
+            ui.ctx().set_theme(egui::Theme::Dark);
+        }
+    });
+}
+
+fn theme_icon_button(
+    ui: &mut egui::Ui,
+    selected: bool,
+    icon: &'static str,
+    hover_text: &'static str,
+    palette: Palette,
+) -> egui::Response {
+    let text = RichText::new(icon).size(16.0).color(if selected {
+        palette.selected_text
+    } else {
+        palette.text
+    });
+    let mut button = egui::Button::selectable(selected, text).corner_radius(14.0);
+    if selected {
+        button = button.fill(palette.selected_fill);
+    }
+    ui.add_sized([32.0, 28.0], button).on_hover_text(hover_text)
+}
+
+fn themed_visuals(palette: Palette, dark_factor: f32) -> egui::Visuals {
+    let mut visuals = egui::Theme::from_dark_mode(dark_factor >= 0.5).default_visuals();
+    visuals.dark_mode = dark_factor >= 0.5;
+    visuals.override_text_color = Some(palette.text);
+    visuals.weak_text_color = Some(palette.muted);
+    visuals.panel_fill = palette.panel;
+    visuals.window_fill = palette.surface;
+    visuals.faint_bg_color = palette.faint;
+    visuals.extreme_bg_color = palette.input;
+    visuals.text_edit_bg_color = Some(palette.input);
+    visuals.code_bg_color = palette.code_bg;
+    visuals.hyperlink_color = palette.accent;
+    visuals.warn_fg_color = palette.warning;
+    visuals.error_fg_color = palette.error;
+    visuals.selection.bg_fill = palette.selected_fill;
+    visuals.selection.stroke = Stroke::new(1.0, palette.selected_text);
+    visuals.window_stroke.color = palette.border;
+
+    visuals.widgets.noninteractive.bg_fill = palette.panel;
+    visuals.widgets.noninteractive.weak_bg_fill = palette.faint;
+    visuals.widgets.noninteractive.bg_stroke.color = palette.border;
+    visuals.widgets.noninteractive.fg_stroke.color = palette.text;
+
+    visuals.widgets.inactive.bg_fill = palette.control_bg;
+    visuals.widgets.inactive.weak_bg_fill = palette.control_bg;
+    visuals.widgets.inactive.bg_stroke.color = palette.border;
+    visuals.widgets.inactive.fg_stroke.color = palette.text;
+
+    visuals.widgets.hovered.bg_fill = palette.control_hover;
+    visuals.widgets.hovered.weak_bg_fill = palette.control_hover;
+    visuals.widgets.hovered.bg_stroke.color = palette.border_strong;
+    visuals.widgets.hovered.fg_stroke.color = palette.text;
+
+    visuals.widgets.active.bg_fill = palette.control_active;
+    visuals.widgets.active.weak_bg_fill = palette.control_active;
+    visuals.widgets.active.bg_stroke.color = palette.accent;
+    visuals.widgets.active.fg_stroke.color = palette.selected_text;
+    visuals.widgets.open = visuals.widgets.hovered;
+    visuals
+}
+
+fn mix_color(light: Color32, dark: Color32, factor: f32) -> Color32 {
+    let factor = factor.clamp(0.0, 1.0);
+    let mix = |start: u8, end: u8| {
+        (start as f32 + (end as f32 - start as f32) * factor)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color32::from_rgba_unmultiplied(
+        mix(light.r(), dark.r()),
+        mix(light.g(), dark.g()),
+        mix(light.b(), dark.b()),
+        mix(light.a(), dark.a()),
+    )
+}
+
+fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
     ui.add_space(12.0);
-    ui.heading(RichText::new(title).color(Color32::from_rgb(31, 42, 68)));
+    ui.heading(RichText::new(title).color(palette.section));
     ui.add_space(8.0);
 }
 
-fn task_list(ui: &mut egui::Ui, tasks: &[Task]) {
+fn task_list(ui: &mut egui::Ui, tasks: &[Task], palette: Palette) {
     if tasks.is_empty() {
         ui.label("No tasks.");
         return;
@@ -514,10 +753,7 @@ fn task_list(ui: &mut egui::Ui, tasks: &[Task]) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&task.title).strong());
                 if let Some(due_date) = task.due_date {
-                    ui.label(
-                        RichText::new(format!("due {due_date}"))
-                            .color(Color32::from_rgb(122, 74, 32)),
-                    );
+                    ui.label(RichText::new(format!("due {due_date}")).color(palette.due));
                 }
                 if let Some(minutes) = task.estimated_minutes {
                     ui.label(format!("{minutes}m"));
