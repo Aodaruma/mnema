@@ -140,6 +140,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 - Home で保存した予定案を時間割として見る。
 - proposed block を scheduled / done / cancelled に変える。
 - 開始・終了時刻を手動で調整する。
+- Day タイムライン上の block をドラッグして開始時刻を変更する。
 - 月間 Calendar で予定密度を俯瞰する。
 
 表示モード:
@@ -165,7 +166,7 @@ ScheduleBlock の状態:
 現状の制限:
 
 - Calendar 画面から block の直接編集はまだできない。
-- drag and drop での時間変更はまだない。
+- Calendar 画面での drag and drop 時間変更はまだない。
 - 繰り返し予定、外部カレンダー、通知はまだない。
 
 ## Projects

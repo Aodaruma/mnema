@@ -183,6 +183,12 @@ struct HomeAgendaOutput {
     move_schedule: Option<MoveScheduleBlockRequest>,
 }
 
+#[derive(Debug, Default)]
+struct ScheduleDayOutput {
+    action: Option<ScheduleAction>,
+    move_schedule: Option<MoveScheduleBlockRequest>,
+}
+
 #[derive(Debug, Clone)]
 struct StatusHistoryEntry {
     task_id: TaskId,
@@ -2767,10 +2773,13 @@ impl MnemaGuiApp {
                     return;
                 }
 
-                if let Some(action) =
-                    schedule_calendar_view(ui, target_date, &self.schedule, timezone, palette)
-                {
+                let output =
+                    schedule_calendar_view(ui, target_date, &self.schedule, timezone, palette);
+                if let Some(action) = output.action {
                     self.handle_schedule_action(action);
+                }
+                if let Some(request) = output.move_schedule {
+                    self.move_schedule_block(request);
                 }
                 self.show_schedule_block_editor(ui, palette);
             }
@@ -5009,14 +5018,14 @@ fn schedule_calendar_view(
     blocks: &[ScheduleBlock],
     timezone: UtcOffset,
     palette: Palette,
-) -> Option<ScheduleAction> {
-    let mut action = None;
+) -> ScheduleDayOutput {
+    let mut output = ScheduleDayOutput::default();
     ui.horizontal_top(|ui| {
-        schedule_timeline(ui, target_date, blocks, timezone, palette);
+        output.move_schedule = schedule_timeline(ui, target_date, blocks, timezone, palette);
         ui.add_space(12.0);
-        action = schedule_action_panel(ui, blocks, timezone, palette);
+        output.action = schedule_action_panel(ui, blocks, timezone, palette);
     });
-    action
+    output
 }
 
 fn schedule_month_calendar(
@@ -5195,14 +5204,15 @@ fn schedule_timeline(
     blocks: &[ScheduleBlock],
     timezone: UtcOffset,
     palette: Palette,
-) {
+) -> Option<MoveScheduleBlockRequest> {
     let Ok((day_start, day_end)) = schedule_bounds(target_date, blocks, timezone) else {
         ui.colored_label(palette.error, "Invalid schedule bounds.");
-        return;
+        return None;
     };
     let total_minutes = (day_end - day_start).whole_minutes().max(60) as f32;
     let height = (total_minutes * 1.15).clamp(420.0, 960.0);
     let width = (ui.available_width() - 260.0).clamp(420.0, 760.0);
+    let mut move_schedule = None;
 
     ScrollArea::vertical()
         .id_salt("schedule_timeline")
@@ -5249,7 +5259,8 @@ fn schedule_timeline(
             }
 
             for block in blocks {
-                draw_schedule_block(
+                draw_draggable_schedule_block(
+                    ui,
                     &painter,
                     rect,
                     day_start,
@@ -5259,7 +5270,51 @@ fn schedule_timeline(
                     palette,
                 );
             }
+
+            let pointer_in_timeline = ui
+                .ctx()
+                .pointer_interact_pos()
+                .filter(|pointer| rect.contains(*pointer));
+            let block_drop_payload = if pointer_in_timeline.is_some() {
+                egui::DragAndDrop::payload::<ScheduleBlockDragPayload>(ui.ctx())
+            } else {
+                None
+            };
+            if block_drop_payload.is_some() {
+                painter.rect(
+                    rect.shrink(2.0),
+                    8.0,
+                    Color32::TRANSPARENT,
+                    Stroke::new(2.0, palette.success),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            if block_drop_payload.is_some()
+                && ui.input(|input| input.pointer.any_released())
+                && let Some(payload) =
+                    egui::DragAndDrop::take_payload::<ScheduleBlockDragPayload>(ui.ctx())
+                && let Some(pointer) = pointer_in_timeline
+            {
+                let start_y = pointer.y
+                    - agenda_pixels_for_minutes(payload.grab_offset_minutes, rect, total_minutes);
+                let start_at = agenda_time_from_y_for_duration(
+                    start_y,
+                    rect,
+                    day_start,
+                    total_minutes,
+                    payload.duration_minutes,
+                );
+                move_schedule = Some(MoveScheduleBlockRequest {
+                    block_id: payload.block_id.clone(),
+                    title: payload.title.clone(),
+                    start_at,
+                    duration_minutes: payload.duration_minutes.max(1),
+                });
+            }
         });
+
+    move_schedule
 }
 
 fn schedule_window_rect(
@@ -5328,7 +5383,7 @@ fn draw_draggable_schedule_block(
     let response = ui
         .interact(
             block_rect,
-            ui.make_persistent_id(("home_schedule_block_drag", block.id.clone())),
+            ui.make_persistent_id(("schedule_block_drag", block.id.clone())),
             egui::Sense::drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab);

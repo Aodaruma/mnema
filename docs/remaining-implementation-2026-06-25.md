@@ -29,6 +29,7 @@
 - Plan / Repair 結果は proposed / unscheduled / issue 件数と issue 内容を表示できる。
 - Plan / Repair / Manual の block は agenda 上で色分けできる。
 - Schedule は日別タイムラインとして表示できる。
+- Schedule の日別タイムラインでは保存済み ScheduleBlock をドラッグして移動でき、移動後は manual / locked な ScheduleBlock として保存できる。
 - Schedule は月間 Calendar 表示へ切り替えられる。
 - Projects は Project Gantt 表示へ切り替えられる。
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
