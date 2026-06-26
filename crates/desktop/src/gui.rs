@@ -5054,97 +5054,138 @@ fn schedule_month_calendar(
     });
     ui.add_space(8.0);
 
-    let cell_width = (ui.available_width() / 7.0).clamp(82.0, 168.0);
-    let header_height = 30.0;
-    let cell_height = 112.0;
-    let table_size = egui::vec2(cell_width * 7.0, header_height + cell_height * 6.0);
-    let (table_rect, _) = ui.allocate_exact_size(table_size, egui::Sense::hover());
-    let painter = ui.painter_at(table_rect);
-    painter.rect_filled(table_rect, 0.0, palette.surface);
-    painter.rect_filled(
-        egui::Rect::from_min_size(
-            table_rect.min,
-            egui::vec2(table_rect.width(), header_height),
-        ),
-        0.0,
-        palette.faint,
-    );
-
-    for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        .iter()
-        .enumerate()
-    {
-        let x = table_rect.left() + cell_width * (index as f32 + 0.5);
-        painter.text(
-            egui::pos2(x, table_rect.top() + header_height * 0.5),
-            egui::Align2::CENTER_CENTER,
-            *label,
-            egui::FontId::proportional(12.0),
-            palette.muted,
-        );
-    }
-
-    let mut selected_rect = None;
+    let mut weeks = Vec::with_capacity(6);
     let mut cell_date = calendar_grid_start(first_day);
-    for row in 0..6 {
-        for column in 0..7 {
-            let date = cell_date;
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    table_rect.left() + cell_width * column as f32,
-                    table_rect.top() + header_height + cell_height * row as f32,
-                ),
-                egui::vec2(cell_width, cell_height),
-            );
-            let response = ui.interact(
-                rect,
-                ui.make_persistent_id(("schedule_month_cell", date.to_string())),
-                egui::Sense::click(),
-            );
-            let day_blocks = blocks
-                .iter()
-                .filter(|block| block.start_at.to_offset(timezone).date() == date)
-                .collect::<Vec<_>>();
-            let in_month = date.month() == target_date.month() && date.year() == target_date.year();
-            let selected = date == target_date;
-            draw_calendar_day_cell(
-                &painter,
-                rect,
-                date,
-                &day_blocks,
-                in_month,
-                selected,
-                response.hovered(),
-                timezone,
-                palette,
-            );
-            if selected {
-                selected_rect = Some(rect);
-            }
-            if response.clicked() {
-                selected_date = Some(date);
-            }
+    for _ in 0..6 {
+        let mut week = Vec::with_capacity(7);
+        for _ in 0..7 {
+            week.push(cell_date);
             cell_date = cell_date.next_day().unwrap_or(cell_date);
         }
-    }
-    draw_calendar_table_grid(
-        &painter,
-        table_rect,
-        cell_width,
-        header_height,
-        cell_height,
-        palette,
-    );
-    if let Some(rect) = selected_rect {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            0.0,
-            Stroke::new(2.0, palette.accent),
-            egui::StrokeKind::Inside,
-        );
+        weeks.push(week);
     }
 
+    let cell_width = (ui.available_width() / 7.0).clamp(72.0, 168.0);
+    let header_height = 30.0;
+    let row_heights = weeks
+        .iter()
+        .map(|week| calendar_week_row_height(week, blocks, timezone))
+        .collect::<Vec<_>>();
+    let table_height = header_height + row_heights.iter().sum::<f32>();
+    let table_size = egui::vec2(cell_width * 7.0, table_height);
+    let max_height = ui.available_height().max(1.0);
+
+    ScrollArea::both()
+        .id_salt("schedule_month_calendar_table")
+        .auto_shrink([false, false])
+        .max_height(max_height)
+        .show(ui, |ui| {
+            let (table_rect, _) = ui.allocate_exact_size(table_size, egui::Sense::hover());
+            let painter = ui.painter_at(table_rect);
+            painter.rect_filled(table_rect, 0.0, palette.surface);
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    table_rect.min,
+                    egui::vec2(table_rect.width(), header_height),
+                ),
+                0.0,
+                palette.faint,
+            );
+
+            for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                .iter()
+                .enumerate()
+            {
+                let x = table_rect.left() + cell_width * (index as f32 + 0.5);
+                painter.text(
+                    egui::pos2(x, table_rect.top() + header_height * 0.5),
+                    egui::Align2::CENTER_CENTER,
+                    *label,
+                    egui::FontId::proportional(12.0),
+                    palette.muted,
+                );
+            }
+
+            let mut selected_rect = None;
+            let mut row_top = table_rect.top() + header_height;
+            for (row, week) in weeks.iter().enumerate() {
+                let row_height = row_heights[row];
+                for (column, date) in week.iter().enumerate() {
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(table_rect.left() + cell_width * column as f32, row_top),
+                        egui::vec2(cell_width, row_height),
+                    );
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id(("schedule_month_cell", date.to_string())),
+                        egui::Sense::click(),
+                    );
+                    let day_blocks = blocks
+                        .iter()
+                        .filter(|block| block.start_at.to_offset(timezone).date() == *date)
+                        .collect::<Vec<_>>();
+                    let in_month =
+                        date.month() == target_date.month() && date.year() == target_date.year();
+                    let selected = *date == target_date;
+                    draw_calendar_day_cell(
+                        &painter,
+                        rect,
+                        *date,
+                        &day_blocks,
+                        in_month,
+                        selected,
+                        response.hovered(),
+                        timezone,
+                        palette,
+                    );
+                    if selected {
+                        selected_rect = Some(rect);
+                    }
+                    if response.clicked() {
+                        selected_date = Some(*date);
+                    }
+                }
+                row_top += row_height;
+            }
+            draw_calendar_table_grid(
+                &painter,
+                table_rect,
+                cell_width,
+                header_height,
+                &row_heights,
+                palette,
+            );
+            if let Some(rect) = selected_rect {
+                painter.rect_stroke(
+                    rect.shrink(1.0),
+                    0.0,
+                    Stroke::new(2.0, palette.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        });
+
     selected_date
+}
+
+fn calendar_week_row_height(week: &[Date], blocks: &[ScheduleBlock], timezone: UtcOffset) -> f32 {
+    let max_visible_lines = week
+        .iter()
+        .map(|date| {
+            let count = blocks
+                .iter()
+                .filter(|block| block.start_at.to_offset(timezone).date() == *date)
+                .count();
+            count.min(3) + usize::from(count > 3)
+        })
+        .max()
+        .unwrap_or(0);
+
+    if max_visible_lines == 0 {
+        58.0
+    } else {
+        (42.0 + max_visible_lines as f32 * 18.0).clamp(84.0, 122.0)
+    }
 }
 
 fn draw_calendar_table_grid(
@@ -5152,7 +5193,7 @@ fn draw_calendar_table_grid(
     rect: egui::Rect,
     cell_width: f32,
     header_height: f32,
-    cell_height: f32,
+    row_heights: &[f32],
     palette: Palette,
 ) {
     for column in 0..=7 {
@@ -5177,8 +5218,9 @@ fn draw_calendar_table_grid(
         ],
         Stroke::new(1.0, palette.border_strong),
     );
-    for row in 1..=6 {
-        let y = rect.top() + header_height + cell_height * row as f32;
+    let mut y = rect.top() + header_height;
+    for row_height in row_heights {
+        y += *row_height;
         painter.line_segment(
             [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
             Stroke::new(1.0, palette.border),
