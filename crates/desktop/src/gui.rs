@@ -5054,55 +5054,136 @@ fn schedule_month_calendar(
     });
     ui.add_space(8.0);
 
-    let column_gap = 6.0;
-    let cell_width = ((ui.available_width() - column_gap * 6.0) / 7.0).clamp(92.0, 168.0);
+    let cell_width = (ui.available_width() / 7.0).clamp(82.0, 168.0);
+    let header_height = 30.0;
     let cell_height = 112.0;
+    let table_size = egui::vec2(cell_width * 7.0, header_height + cell_height * 6.0);
+    let (table_rect, _) = ui.allocate_exact_size(table_size, egui::Sense::hover());
+    let painter = ui.painter_at(table_rect);
+    painter.rect_filled(table_rect, 0.0, palette.surface);
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            table_rect.min,
+            egui::vec2(table_rect.width(), header_height),
+        ),
+        0.0,
+        palette.faint,
+    );
 
-    ui.horizontal(|ui| {
-        for label in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
-            ui.add_sized(
-                [cell_width, 20.0],
-                egui::Label::new(regular_text(label).color(palette.muted)),
-            );
-        }
-    });
-    ui.add_space(4.0);
+    for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        .iter()
+        .enumerate()
+    {
+        let x = table_rect.left() + cell_width * (index as f32 + 0.5);
+        painter.text(
+            egui::pos2(x, table_rect.top() + header_height * 0.5),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            egui::FontId::proportional(12.0),
+            palette.muted,
+        );
+    }
 
+    let mut selected_rect = None;
     let mut cell_date = calendar_grid_start(first_day);
-    for _ in 0..6 {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = column_gap;
-            for _ in 0..7 {
-                let date = cell_date;
-                let day_blocks = blocks
-                    .iter()
-                    .filter(|block| block.start_at.to_offset(timezone).date() == date)
-                    .collect::<Vec<_>>();
-                let in_month =
-                    date.month() == target_date.month() && date.year() == target_date.year();
-                let selected = date == target_date;
-                let (rect, response) = ui
-                    .allocate_exact_size(egui::vec2(cell_width, cell_height), egui::Sense::click());
-                draw_calendar_day_cell(
-                    ui.painter(),
-                    rect,
-                    date,
-                    &day_blocks,
-                    in_month,
-                    selected,
-                    timezone,
-                    palette,
-                );
-                if response.clicked() {
-                    selected_date = Some(date);
-                }
-                cell_date = cell_date.next_day().unwrap_or(cell_date);
+    for row in 0..6 {
+        for column in 0..7 {
+            let date = cell_date;
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    table_rect.left() + cell_width * column as f32,
+                    table_rect.top() + header_height + cell_height * row as f32,
+                ),
+                egui::vec2(cell_width, cell_height),
+            );
+            let response = ui.interact(
+                rect,
+                ui.make_persistent_id(("schedule_month_cell", date.to_string())),
+                egui::Sense::click(),
+            );
+            let day_blocks = blocks
+                .iter()
+                .filter(|block| block.start_at.to_offset(timezone).date() == date)
+                .collect::<Vec<_>>();
+            let in_month = date.month() == target_date.month() && date.year() == target_date.year();
+            let selected = date == target_date;
+            draw_calendar_day_cell(
+                &painter,
+                rect,
+                date,
+                &day_blocks,
+                in_month,
+                selected,
+                response.hovered(),
+                timezone,
+                palette,
+            );
+            if selected {
+                selected_rect = Some(rect);
             }
-        });
-        ui.add_space(6.0);
+            if response.clicked() {
+                selected_date = Some(date);
+            }
+            cell_date = cell_date.next_day().unwrap_or(cell_date);
+        }
+    }
+    draw_calendar_table_grid(
+        &painter,
+        table_rect,
+        cell_width,
+        header_height,
+        cell_height,
+        palette,
+    );
+    if let Some(rect) = selected_rect {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            0.0,
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
     }
 
     selected_date
+}
+
+fn draw_calendar_table_grid(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    cell_width: f32,
+    header_height: f32,
+    cell_height: f32,
+    palette: Palette,
+) {
+    for column in 0..=7 {
+        let x = rect.left() + cell_width * column as f32;
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0, palette.border),
+        );
+    }
+
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.top()),
+            egui::pos2(rect.right(), rect.top()),
+        ],
+        Stroke::new(1.0, palette.border),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.top() + header_height),
+            egui::pos2(rect.right(), rect.top() + header_height),
+        ],
+        Stroke::new(1.0, palette.border_strong),
+    );
+    for row in 1..=6 {
+        let y = rect.top() + header_height + cell_height * row as f32;
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            Stroke::new(1.0, palette.border),
+        );
+    }
 }
 
 fn draw_calendar_day_cell(
@@ -5112,28 +5193,20 @@ fn draw_calendar_day_cell(
     blocks: &[&ScheduleBlock],
     in_month: bool,
     selected: bool,
+    hovered: bool,
     timezone: UtcOffset,
     palette: Palette,
 ) {
     let fill = if selected {
         palette.selected_fill
+    } else if hovered {
+        palette.control_bg
     } else if in_month {
         palette.surface
     } else {
         palette.faint
     };
-    let stroke = if selected {
-        palette.accent
-    } else {
-        palette.border
-    };
-    painter.rect(
-        rect,
-        6.0,
-        fill,
-        Stroke::new(1.0, stroke),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect_filled(rect, 0.0, fill);
 
     let text_color = if in_month {
         palette.text
