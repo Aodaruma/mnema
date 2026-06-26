@@ -98,6 +98,14 @@ struct TaskDragPayload {
 }
 
 #[derive(Debug, Clone)]
+struct ScheduleBlockDragPayload {
+    block_id: ScheduleBlockId,
+    title: String,
+    duration_minutes: i64,
+    grab_offset_minutes: i64,
+}
+
+#[derive(Debug, Clone)]
 struct ManualScheduleRequest {
     task_id: TaskId,
     title: String,
@@ -105,10 +113,19 @@ struct ManualScheduleRequest {
     duration_minutes: u32,
 }
 
+#[derive(Debug, Clone)]
+struct MoveScheduleBlockRequest {
+    block_id: ScheduleBlockId,
+    title: String,
+    start_at: OffsetDateTime,
+    duration_minutes: i64,
+}
+
 #[derive(Debug, Default)]
 struct HomeAgendaOutput {
     repair_clicked: bool,
     manual_schedule: Option<ManualScheduleRequest>,
+    move_schedule: Option<MoveScheduleBlockRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -1886,6 +1903,46 @@ impl MnemaGuiApp {
         }
     }
 
+    fn move_schedule_block(&mut self, request: MoveScheduleBlockRequest) {
+        let Ok(vault) = self.vault_clone() else {
+            return;
+        };
+        let duration_minutes = request.duration_minutes.max(1);
+        let duration = time::Duration::minutes(duration_minutes);
+        let title = request.title.clone();
+        let block_id = request.block_id;
+        let start_at = request.start_at;
+        let end_at = start_at + duration;
+
+        let result = self.runtime.block_on(async move {
+            let schedule_block_repo = vault.schedule_block_repo();
+            let service = ScheduleBlockCommandService::new(schedule_block_repo.as_ref());
+            Result::<ScheduleBlock>::Ok(
+                service
+                    .update_window(UpdateScheduleBlockWindowRequest {
+                        block_id,
+                        start_at,
+                        end_at,
+                    })
+                    .await?,
+            )
+        });
+
+        match result {
+            Ok(block) => {
+                self.plan = None;
+                self.message = format!(
+                    "Moved manually: {}",
+                    block.title_snapshot.as_deref().unwrap_or(title.as_str())
+                );
+                self.error = None;
+                self.refresh_schedule();
+                self.refresh_schedule_month();
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn normalized_vault_path(&self) -> PathBuf {
         let trimmed = self.vault_path.trim();
         if trimmed.is_empty() {
@@ -2230,9 +2287,12 @@ impl MnemaGuiApp {
                 timezone,
                 palette,
             );
-            repair_from_now = agenda_output.repair_clicked;
+            repair_from_now |= agenda_output.repair_clicked;
             if let Some(request) = agenda_output.manual_schedule {
                 self.create_manual_schedule_block(request);
+            }
+            if let Some(request) = agenda_output.move_schedule {
+                self.move_schedule_block(request);
             }
         });
         if self.scroll_home_agenda_to_now || scroll_home_agenda_to_now {
@@ -4057,8 +4117,7 @@ fn home_agenda_view(
             let total_minutes = (day_end - day_start).whole_minutes() as f32;
             let width = ui.available_width().max(420.0);
             let height = 24.0 * 72.0;
-            let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
             let painter = ui.painter_at(rect);
             painter.rect(
                 rect,
@@ -4078,22 +4137,25 @@ fn home_agenda_view(
                 palette,
             );
 
-            if let Some(blocks) = proposed_blocks {
-                for block in blocks {
-                    draw_proposed_agenda_block(
-                        &painter,
-                        rect,
-                        day_start,
-                        total_minutes,
-                        block,
-                        &plan_source,
-                        timezone,
-                        palette,
-                    );
+            if schedule.is_empty() {
+                if let Some(blocks) = proposed_blocks {
+                    for block in blocks {
+                        draw_proposed_agenda_block(
+                            &painter,
+                            rect,
+                            day_start,
+                            total_minutes,
+                            block,
+                            &plan_source,
+                            timezone,
+                            palette,
+                        );
+                    }
                 }
             } else {
                 for block in schedule {
-                    draw_schedule_block(
+                    draw_draggable_schedule_block(
+                        ui,
                         &painter,
                         rect,
                         day_start,
@@ -4105,26 +4167,83 @@ fn home_agenda_view(
                 }
             }
 
-            if response.dnd_hover_payload::<TaskDragPayload>().is_some() {
+            let pointer_in_agenda = ui
+                .ctx()
+                .pointer_interact_pos()
+                .filter(|pointer| rect.contains(*pointer));
+            let task_drop_payload = if pointer_in_agenda.is_some() {
+                egui::DragAndDrop::payload::<TaskDragPayload>(ui.ctx())
+            } else {
+                None
+            };
+            let block_drop_payload = if pointer_in_agenda.is_some() {
+                egui::DragAndDrop::payload::<ScheduleBlockDragPayload>(ui.ctx())
+            } else {
+                None
+            };
+            if task_drop_payload.is_some() || block_drop_payload.is_some() {
                 painter.rect(
                     rect.shrink(2.0),
                     8.0,
                     Color32::TRANSPARENT,
-                    Stroke::new(2.0, palette.accent),
+                    Stroke::new(
+                        2.0,
+                        if block_drop_payload.is_some() {
+                            palette.success
+                        } else {
+                            palette.accent
+                        },
+                    ),
                     egui::StrokeKind::Inside,
                 );
             }
-            if let Some(payload) = response.dnd_release_payload::<TaskDragPayload>()
-                && let Some(pointer) = ui.ctx().pointer_interact_pos()
-                && rect.contains(pointer)
-            {
-                let start_at = agenda_time_from_y(pointer.y, rect, day_start, total_minutes);
-                output.manual_schedule = Some(ManualScheduleRequest {
-                    task_id: payload.task_id.clone(),
-                    title: payload.title.clone(),
-                    start_at,
-                    duration_minutes: payload.estimated_minutes.unwrap_or(30).max(1),
-                });
+
+            if ui.input(|input| input.pointer.any_released()) {
+                if task_drop_payload.is_some() {
+                    if let Some(payload) =
+                        egui::DragAndDrop::take_payload::<TaskDragPayload>(ui.ctx())
+                        && let Some(pointer) = pointer_in_agenda
+                    {
+                        let duration_minutes = payload.estimated_minutes.unwrap_or(30).max(1);
+                        let start_at = agenda_time_from_y_for_duration(
+                            pointer.y,
+                            rect,
+                            day_start,
+                            total_minutes,
+                            i64::from(duration_minutes),
+                        );
+                        output.manual_schedule = Some(ManualScheduleRequest {
+                            task_id: payload.task_id.clone(),
+                            title: payload.title.clone(),
+                            start_at,
+                            duration_minutes,
+                        });
+                    }
+                } else if block_drop_payload.is_some()
+                    && let Some(payload) =
+                        egui::DragAndDrop::take_payload::<ScheduleBlockDragPayload>(ui.ctx())
+                    && let Some(pointer) = pointer_in_agenda
+                {
+                    let start_y = pointer.y
+                        - agenda_pixels_for_minutes(
+                            payload.grab_offset_minutes,
+                            rect,
+                            total_minutes,
+                        );
+                    let start_at = agenda_time_from_y_for_duration(
+                        start_y,
+                        rect,
+                        day_start,
+                        total_minutes,
+                        payload.duration_minutes,
+                    );
+                    output.move_schedule = Some(MoveScheduleBlockRequest {
+                        block_id: payload.block_id.clone(),
+                        title: payload.title.clone(),
+                        start_at,
+                        duration_minutes: payload.duration_minutes.max(1),
+                    });
+                }
             }
 
             if draw_current_time_repair(
@@ -4183,17 +4302,24 @@ fn draw_agenda_hour_grid(
     }
 }
 
-fn agenda_time_from_y(
+fn agenda_time_from_y_for_duration(
     y: f32,
     rect: egui::Rect,
     day_start: OffsetDateTime,
     total_minutes: f32,
+    duration_minutes: i64,
 ) -> OffsetDateTime {
+    let duration_minutes = duration_minutes.max(1) as f32;
+    let max_start_minutes = (total_minutes - duration_minutes).max(0.0);
     let raw_minutes =
         ((y - rect.top()) / rect.height() * total_minutes).clamp(0.0, total_minutes - 1.0);
     let rounded_minutes =
-        ((raw_minutes / 15.0).round() * 15.0).clamp(0.0, total_minutes - 15.0) as i64;
+        ((raw_minutes / 15.0).round() * 15.0).clamp(0.0, max_start_minutes) as i64;
     day_start + time::Duration::minutes(rounded_minutes)
+}
+
+fn agenda_pixels_for_minutes(minutes: i64, rect: egui::Rect, total_minutes: f32) -> f32 {
+    minutes.max(0) as f32 * rect.height() / total_minutes
 }
 
 fn draw_proposed_agenda_block(
@@ -4865,6 +4991,121 @@ fn schedule_timeline(
         });
 }
 
+fn schedule_window_rect(
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    start_at: OffsetDateTime,
+    end_at: OffsetDateTime,
+) -> Option<egui::Rect> {
+    let label_width = 58.0;
+    let left = rect.left() + label_width + 10.0;
+    let right = rect.right() - 12.0;
+    let pixels_per_minute = rect.height() / total_minutes;
+    let start_minutes = (start_at - day_start).whole_minutes() as f32;
+    let end_minutes = (end_at - day_start).whole_minutes() as f32;
+    let top = rect
+        .top()
+        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
+    let bottom = rect
+        .bottom()
+        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
+    if bottom <= top {
+        return None;
+    }
+
+    Some(egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(right, bottom.max(top + 30.0)),
+    ))
+}
+
+fn schedule_block_rect(
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    block: &ScheduleBlock,
+) -> Option<egui::Rect> {
+    schedule_window_rect(rect, day_start, total_minutes, block.start_at, block.end_at)
+}
+
+fn draw_draggable_schedule_block(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    block: &ScheduleBlock,
+    timezone: UtcOffset,
+    palette: Palette,
+) {
+    draw_schedule_block(
+        painter,
+        rect,
+        day_start,
+        total_minutes,
+        block,
+        timezone,
+        palette,
+    );
+
+    let Some(block_rect) = schedule_block_rect(rect, day_start, total_minutes, block) else {
+        return;
+    };
+    let duration_minutes = schedule_block_minutes(block).max(1);
+    let pixels_per_minute = rect.height() / total_minutes;
+    let response = ui
+        .interact(
+            block_rect,
+            ui.make_persistent_id(("home_schedule_block_drag", block.id.clone())),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab);
+    let grab_offset_minutes = schedule_block_grab_offset_minutes(
+        &response,
+        block_rect,
+        pixels_per_minute,
+        duration_minutes,
+    );
+    let title = block
+        .title_snapshot
+        .as_deref()
+        .unwrap_or("(untitled block)")
+        .to_string();
+    response.dnd_set_drag_payload(ScheduleBlockDragPayload {
+        block_id: block.id.clone(),
+        title: title.clone(),
+        duration_minutes,
+        grab_offset_minutes,
+    });
+
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            let start_y =
+                pointer.y - agenda_pixels_for_minutes(grab_offset_minutes, rect, total_minutes);
+            let start_at = agenda_time_from_y_for_duration(
+                start_y,
+                rect,
+                day_start,
+                total_minutes,
+                duration_minutes,
+            );
+            draw_schedule_move_preview(
+                painter,
+                rect,
+                day_start,
+                total_minutes,
+                start_at,
+                duration_minutes,
+                &title,
+                timezone,
+                palette,
+            );
+        }
+    }
+}
+
 fn draw_schedule_block(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -4874,26 +5115,10 @@ fn draw_schedule_block(
     timezone: UtcOffset,
     palette: Palette,
 ) {
-    let label_width = 58.0;
-    let left = rect.left() + label_width + 10.0;
-    let right = rect.right() - 12.0;
-    let pixels_per_minute = rect.height() / total_minutes;
-    let start_minutes = (block.start_at - day_start).whole_minutes() as f32;
-    let end_minutes = (block.end_at - day_start).whole_minutes() as f32;
-    let top = rect
-        .top()
-        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
-    let bottom = rect
-        .bottom()
-        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
-    if bottom <= top {
+    let Some(block_rect) = schedule_block_rect(rect, day_start, total_minutes, block) else {
         return;
-    }
+    };
 
-    let block_rect = egui::Rect::from_min_max(
-        egui::pos2(left, top),
-        egui::pos2(right, bottom.max(top + 30.0)),
-    );
     let (fill, stroke, text_color) = schedule_block_colors(block, palette);
     painter.rect(
         block_rect,
@@ -4920,6 +5145,65 @@ fn draw_schedule_block(
         label,
         egui::FontId::proportional(13.0),
         text_color,
+    );
+}
+
+fn schedule_block_grab_offset_minutes(
+    response: &egui::Response,
+    block_rect: egui::Rect,
+    pixels_per_minute: f32,
+    duration_minutes: i64,
+) -> i64 {
+    let offset = response
+        .interact_pointer_pos()
+        .map(|position| {
+            let drag_origin_y = position.y - response.drag_delta().y;
+            ((drag_origin_y - block_rect.top()) / pixels_per_minute).round() as i64
+        })
+        .unwrap_or(0);
+    offset.clamp(0, duration_minutes.saturating_sub(1))
+}
+
+fn draw_schedule_move_preview(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    day_start: OffsetDateTime,
+    total_minutes: f32,
+    start_at: OffsetDateTime,
+    duration_minutes: i64,
+    title: &str,
+    timezone: UtcOffset,
+    palette: Palette,
+) {
+    let end_at = start_at + time::Duration::minutes(duration_minutes.max(1));
+    let Some(preview_rect) = schedule_window_rect(rect, day_start, total_minutes, start_at, end_at)
+    else {
+        return;
+    };
+    let fill = Color32::from_rgba_unmultiplied(
+        palette.success.r(),
+        palette.success.g(),
+        palette.success.b(),
+        54,
+    );
+    painter.rect(
+        preview_rect,
+        6.0,
+        fill,
+        Stroke::new(2.0, palette.success),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        preview_rect.left_top() + egui::vec2(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{}-{}  {}",
+            format_hm_in(start_at, timezone),
+            format_hm_in(end_at, timezone),
+            title
+        ),
+        egui::FontId::proportional(13.0),
+        palette.text,
     );
 }
 
@@ -5747,8 +6031,16 @@ mod tests {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 1440.0));
 
         assert_eq!(
-            format_hm(agenda_time_from_y(548.0, rect, day_start, 1440.0)),
+            format_hm(agenda_time_from_y_for_duration(
+                548.0, rect, day_start, 1440.0, 15
+            )),
             "09:15"
+        );
+        assert_eq!(
+            format_hm(agenda_time_from_y_for_duration(
+                1438.0, rect, day_start, 1440.0, 90
+            )),
+            "22:30"
         );
     }
 }

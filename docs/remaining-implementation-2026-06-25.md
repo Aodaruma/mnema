@@ -18,6 +18,7 @@
 - タスク一覧のステータス変更は `Ctrl+Z` / `Ctrl+Shift+Z` で undo / redo できる。
 - Home では完了済みタスクを三角トグルで表示でき、直近10件から追加読み込みできる。完了済みタスクのステータスも変更できる。
 - Home ではタスク行を agenda へドラッグして、manual / locked な ScheduleBlock として保存できる。
+- Home では agenda 上の保存済み ScheduleBlock をドラッグして移動でき、移動後は manual / locked な ScheduleBlock として保存できる。
 - Home 表示時は現在時刻ライン付近へ自動スクロールできる。
 - Home で plan を生成し、ScheduleBlock として自動保存できる。
 - Home の plan は過去日や当日の現在時刻以前には配置しない。

@@ -107,6 +107,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 - Done toggle: 左パネル下部の三角アイコンで完了済みタスクを表示できる。直近10件から表示し、必要に応じて追加読み込みする。完了済みタスクにも status button を出し、戻し操作ができる。
 - delete icon: Material Icons を使う。ホバー時に明るくなり、確認後に削除する。
 - Task drag: タスク行を agenda にドラッグすると、ドロップ位置の時刻に manual / locked な ScheduleBlock として保存する。開始時刻は15分単位に丸める。
+- Block drag: agenda 上の保存済み timeblock をドラッグすると開始時刻を変更できる。移動後は Plan / Repair / Manual 由来に関わらず manual / locked な ScheduleBlock として保存する。
 - Agenda date: 右パネル上部で対象日を切り替える。
 - Today: すでに当日が表示されている状態でクリックすると、agenda の現在時刻ラインへスクロールする。
 - Home open: Home 表示時は対象日が今日なら現在時刻ライン付近へ自動スクロールする。
