@@ -65,6 +65,61 @@ enum ProjectViewMode {
     Gantt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskListDensity {
+    Normal,
+    Compact,
+}
+
+impl TaskListDensity {
+    fn row_height(self) -> f32 {
+        match self {
+            Self::Normal => 64.0,
+            Self::Compact => 48.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Compact => "Compact",
+        }
+    }
+}
+
+impl Default for TaskListDensity {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskSortMode {
+    DueDate,
+    Estimate,
+    Importance,
+    Created,
+}
+
+impl TaskSortMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DueDate => "Due date",
+            Self::Estimate => "Estimate",
+            Self::Importance => "Importance",
+            Self::Created => "Created",
+        }
+    }
+}
+
+impl Default for TaskSortMode {
+    fn default() -> Self {
+        Self::DueDate
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TaskAction {
     SetStatus(TaskId, StatusId),
@@ -226,6 +281,10 @@ struct DesktopConfig {
     dark_mode: bool,
     #[serde(default = "default_timezone_offset")]
     timezone_offset: String,
+    #[serde(default)]
+    home_task_density: TaskListDensity,
+    #[serde(default)]
+    home_task_sort: TaskSortMode,
     llm_provider: DesktopLlmProvider,
     ollama_url: String,
     openai_url: String,
@@ -242,6 +301,8 @@ impl DesktopConfig {
             database_url: DEFAULT_POSTGRES_URL.to_string(),
             dark_mode: default_dark_mode,
             timezone_offset: default_timezone_offset(),
+            home_task_density: TaskListDensity::Normal,
+            home_task_sort: TaskSortMode::DueDate,
             llm_provider: DesktopLlmProvider::Disabled,
             ollama_url: "http://localhost:11434".to_string(),
             openai_url: "https://api.openai.com".to_string(),
@@ -585,6 +646,8 @@ struct MnemaGuiApp {
     message: String,
     error: Option<String>,
     dark_mode: bool,
+    home_task_density: TaskListDensity,
+    home_task_sort: TaskSortMode,
     native_menu: Option<NativeMenu>,
     native_menu_synced_dark_mode: Option<bool>,
     settings_message: String,
@@ -676,6 +739,8 @@ impl MnemaGuiApp {
             message: String::new(),
             error: None,
             dark_mode,
+            home_task_density: config.home_task_density,
+            home_task_sort: config.home_task_sort,
             native_menu,
             native_menu_synced_dark_mode,
             settings_message: String::new(),
@@ -1998,6 +2063,8 @@ impl MnemaGuiApp {
             database_url: self.normalized_database_url(),
             dark_mode: self.dark_mode,
             timezone_offset: self.timezone_offset.trim().to_string(),
+            home_task_density: self.home_task_density,
+            home_task_sort: self.home_task_sort,
             llm_provider: self.llm_provider,
             ollama_url: self.ollama_url.trim().to_string(),
             openai_url: self.openai_url.trim().to_string(),
@@ -2015,6 +2082,8 @@ impl MnemaGuiApp {
                 self.planning_model = config.planning_model;
                 self.routine_model = config.routine_model;
                 self.timezone_offset = config.timezone_offset;
+                self.home_task_density = config.home_task_density;
+                self.home_task_sort = config.home_task_sort;
                 self.scroll_home_agenda_to_now = true;
                 self.settings_message = String::from("Settings saved");
                 self.error = None;
@@ -2210,14 +2279,33 @@ impl MnemaGuiApp {
         let mut home_date_changed = false;
         let mut scroll_home_agenda_to_now = false;
         let timezone = self.app_timezone();
+        let sorted_home_tasks = sorted_tasks(&self.tasks, self.home_task_sort);
 
         ui.columns(2, |columns| {
-            columns[0].label(bold_text("Tasks").color(palette.section));
+            columns[0].horizontal(|ui| {
+                ui.label(bold_text("Tasks").color(palette.section));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("home_task_sort")
+                        .selected_text(self.home_task_sort.label())
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                TaskSortMode::DueDate,
+                                TaskSortMode::Estimate,
+                                TaskSortMode::Importance,
+                                TaskSortMode::Created,
+                            ] {
+                                ui.selectable_value(&mut self.home_task_sort, mode, mode.label());
+                            }
+                        });
+                    ui.label(regular_text("Sort").size(12.0).color(palette.muted));
+                });
+            });
             columns[0].add_space(6.0);
             task_action = task_list(
                 &mut columns[0],
                 "home_tasks",
-                &self.tasks,
+                &sorted_home_tasks,
                 &self.statuses,
                 &self.status_groups,
                 &self.lists,
@@ -2225,6 +2313,7 @@ impl MnemaGuiApp {
                 self.confirming_delete_task_id.as_ref(),
                 &mut self.inline_task_edit,
                 Some(360.0),
+                self.home_task_density,
                 timezone,
                 palette,
             );
@@ -2237,6 +2326,7 @@ impl MnemaGuiApp {
                 &self.projects,
                 &mut self.show_done_tasks,
                 &mut self.done_task_limit,
+                self.home_task_density,
                 palette,
             ) {
                 task_action = Some(action);
@@ -2364,6 +2454,7 @@ impl MnemaGuiApp {
             self.confirming_delete_task_id.as_ref(),
             &mut self.inline_task_edit,
             None,
+            TaskListDensity::Normal,
             timezone,
             palette,
         ) {
@@ -2722,6 +2813,36 @@ impl MnemaGuiApp {
                         self.timezone_offset = "+00:00".to_string();
                     }
                 });
+                ui.end_row();
+
+                ui.label("Home tasks");
+                ui.horizontal(|ui| {
+                    ui.radio_value(
+                        &mut self.home_task_density,
+                        TaskListDensity::Normal,
+                        TaskListDensity::Normal.label(),
+                    );
+                    ui.radio_value(
+                        &mut self.home_task_density,
+                        TaskListDensity::Compact,
+                        TaskListDensity::Compact.label(),
+                    );
+                });
+                ui.end_row();
+
+                ui.label("Task sort");
+                egui::ComboBox::from_id_salt("settings_home_task_sort")
+                    .selected_text(self.home_task_sort.label())
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            TaskSortMode::DueDate,
+                            TaskSortMode::Estimate,
+                            TaskSortMode::Importance,
+                            TaskSortMode::Created,
+                        ] {
+                            ui.selectable_value(&mut self.home_task_sort, mode, mode.label());
+                        }
+                    });
                 ui.end_row();
 
                 ui.label("LLM provider");
@@ -3447,6 +3568,7 @@ fn task_list(
     confirming_delete_task_id: Option<&TaskId>,
     inline_task_edit: &mut Option<TaskInlineEdit>,
     max_height: Option<f32>,
+    density: TaskListDensity,
     timezone: UtcOffset,
     palette: Palette,
 ) -> Option<TaskAction> {
@@ -3463,8 +3585,8 @@ fn task_list(
         scroll_area = scroll_area.max_height(max_height);
     }
     scroll_area.show(ui, |ui| {
-        for task in tasks {
-            let row_height = 64.0;
+        for (index, task) in tasks.iter().enumerate() {
+            let row_height = density.row_height();
             let payload = TaskDragPayload {
                 task_id: task.id.clone(),
                 title: task.title.clone(),
@@ -3490,7 +3612,11 @@ fn task_list(
                             ui.vertical(|ui| {
                                 ui.label(
                                     regular_text(task_context_line(task, lists, projects))
-                                        .size(11.0)
+                                        .size(if density == TaskListDensity::Compact {
+                                            10.0
+                                        } else {
+                                            11.0
+                                        })
                                         .color(palette.muted),
                                 );
                                 inline_task_title(
@@ -3501,44 +3627,17 @@ fn task_list(
                                     inline_task_edit,
                                     &mut action,
                                 );
-                                ui.horizontal(|ui| {
-                                    inline_task_meta(
+                                if density == TaskListDensity::Normal {
+                                    task_meta_row(
                                         ui,
                                         id_salt,
                                         task,
-                                        TaskInlineField::DueDate,
-                                        task.due_date
-                                            .map(|date| format!("due {date}"))
-                                            .unwrap_or_else(|| "due none".to_string()),
-                                        task.due_date
-                                            .map(|date| date.to_string())
-                                            .unwrap_or_default(),
-                                        92.0,
-                                        palette.due,
                                         palette,
                                         timezone,
                                         inline_task_edit,
                                         &mut action,
                                     );
-                                    inline_task_meta(
-                                        ui,
-                                        id_salt,
-                                        task,
-                                        TaskInlineField::EstimateMinutes,
-                                        task.estimated_minutes
-                                            .map(|minutes| format!("{minutes} min"))
-                                            .unwrap_or_else(|| "estimate none".to_string()),
-                                        task.estimated_minutes
-                                            .map(|minutes| minutes.to_string())
-                                            .unwrap_or_default(),
-                                        82.0,
-                                        palette.muted,
-                                        palette,
-                                        timezone,
-                                        inline_task_edit,
-                                        &mut action,
-                                    );
-                                });
+                                }
                             });
                             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                                 let confirming = confirming_delete_task_id == Some(&task.id);
@@ -3559,6 +3658,18 @@ fn task_list(
                                 {
                                     action = Some(TaskAction::RequestDelete(task.id.clone()));
                                 }
+                                if density == TaskListDensity::Compact {
+                                    ui.add_space(8.0);
+                                    task_meta_row(
+                                        ui,
+                                        id_salt,
+                                        task,
+                                        palette,
+                                        timezone,
+                                        inline_task_edit,
+                                        &mut action,
+                                    );
+                                }
                             });
                         },
                     );
@@ -3568,10 +3679,61 @@ fn task_list(
             if response.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
-            ui.separator();
+            if index + 1 < tasks.len() {
+                ui.separator();
+            }
         }
     });
     action
+}
+
+fn task_meta_row(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    task: &Task,
+    palette: Palette,
+    timezone: UtcOffset,
+    inline_task_edit: &mut Option<TaskInlineEdit>,
+    action: &mut Option<TaskAction>,
+) {
+    ui.horizontal(|ui| {
+        inline_task_meta(
+            ui,
+            id_salt,
+            task,
+            TaskInlineField::DueDate,
+            task.due_date
+                .map(|date| format!("due {date}"))
+                .unwrap_or_else(|| "due none".to_string()),
+            task.due_date
+                .map(|date| date.to_string())
+                .unwrap_or_default(),
+            92.0,
+            palette.due,
+            palette,
+            timezone,
+            inline_task_edit,
+            action,
+        );
+        inline_task_meta(
+            ui,
+            id_salt,
+            task,
+            TaskInlineField::EstimateMinutes,
+            task.estimated_minutes
+                .map(|minutes| format!("{minutes} min"))
+                .unwrap_or_else(|| "estimate none".to_string()),
+            task.estimated_minutes
+                .map(|minutes| minutes.to_string())
+                .unwrap_or_default(),
+            82.0,
+            palette.muted,
+            palette,
+            timezone,
+            inline_task_edit,
+            action,
+        );
+    });
 }
 
 fn done_task_section(
@@ -3583,6 +3745,7 @@ fn done_task_section(
     projects: &[Project],
     show_done_tasks: &mut bool,
     done_task_limit: &mut usize,
+    density: TaskListDensity,
     palette: Palette,
 ) -> Option<TaskAction> {
     if done_tasks.is_empty() {
@@ -3590,8 +3753,12 @@ fn done_task_section(
     }
 
     let mut action = None;
-    ui.add_space(8.0);
-    ui.separator();
+    if *show_done_tasks {
+        ui.add_space(8.0);
+        ui.separator();
+    } else {
+        ui.add_space(2.0);
+    }
     ui.horizontal(|ui| {
         let icon = if *show_done_tasks {
             ICON_EXPAND_MORE
@@ -3615,33 +3782,44 @@ fn done_task_section(
         return None;
     }
 
+    ui.add_space(4.0);
     let visible_count = (*done_task_limit).min(done_tasks.len());
-    for task in done_tasks.iter().take(visible_count) {
-        ui.horizontal(|ui| {
-            task_status_button(
-                ui,
-                "done_tasks",
-                task,
-                statuses,
-                status_groups,
-                palette,
-                &mut action,
-            );
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    regular_text(task_context_line(task, lists, projects))
-                        .size(11.0)
-                        .color(palette.muted),
+    for (index, task) in done_tasks.iter().take(visible_count).enumerate() {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), density.row_height().min(56.0)),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                task_status_button(
+                    ui,
+                    "done_tasks",
+                    task,
+                    statuses,
+                    status_groups,
+                    palette,
+                    &mut action,
                 );
-                ui.label(
-                    regular_text(task.title.as_str())
-                        .size(13.0)
-                        .color(palette.text),
-                );
-            });
-        });
-        ui.separator();
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        regular_text(task_context_line(task, lists, projects))
+                            .size(if density == TaskListDensity::Compact {
+                                10.0
+                            } else {
+                                11.0
+                            })
+                            .color(palette.muted),
+                    );
+                    ui.label(
+                        regular_text(task.title.as_str())
+                            .size(13.0)
+                            .color(palette.text),
+                    );
+                });
+            },
+        );
+        if index + 1 < visible_count {
+            ui.separator();
+        }
     }
 
     if visible_count < done_tasks.len() && ui.button("Load more done").clicked() {
@@ -4005,6 +4183,40 @@ fn task_status_color(kind: &StatusGroupKind, palette: Palette) -> Color32 {
         StatusGroupKind::Pending => palette.warning,
         StatusGroupKind::Done => palette.success,
     }
+}
+
+fn sorted_tasks(tasks: &[Task], mode: TaskSortMode) -> Vec<Task> {
+    let mut tasks = tasks.to_vec();
+    match mode {
+        TaskSortMode::DueDate => {
+            tasks.sort_by_key(|task| (task.due_date.is_none(), task.due_date, task.created_at));
+        }
+        TaskSortMode::Estimate => {
+            tasks.sort_by_key(|task| {
+                (
+                    task.estimated_minutes.is_none(),
+                    task.estimated_minutes.unwrap_or(u32::MAX),
+                    task.due_date.is_none(),
+                    task.due_date,
+                    task.created_at,
+                )
+            });
+        }
+        TaskSortMode::Importance => {
+            tasks.sort_by_key(|task| {
+                (
+                    Reverse(task.cost_points.unwrap_or(0)),
+                    task.due_date.is_none(),
+                    task.due_date,
+                    task.created_at,
+                )
+            });
+        }
+        TaskSortMode::Created => {
+            tasks.sort_by_key(|task| task.created_at);
+        }
+    }
+    tasks
 }
 
 fn task_context_line(task: &Task, lists: &[List], projects: &[Project]) -> String {
@@ -5952,6 +6164,38 @@ mod tests {
     use super::*;
     use time::macros::date;
 
+    fn test_task(
+        title: &str,
+        due_date: Option<Date>,
+        estimated_minutes: Option<u32>,
+        cost_points: Option<u32>,
+        created_hour: u8,
+    ) -> Task {
+        Task {
+            id: TaskId::new(),
+            title: title.to_string(),
+            description: None,
+            project_id: None,
+            list_id: None,
+            status_id: StatusId::new(),
+            due_date,
+            start_date: None,
+            estimated_minutes,
+            cost_points,
+            dependencies: Vec::new(),
+            milestone_id: None,
+            created_at: date!(2026 - 06 - 25)
+                .with_hms(created_hour, 0, 0)
+                .unwrap()
+                .assume_utc(),
+            updated_at: date!(2026 - 06 - 25)
+                .with_hms(created_hour, 0, 0)
+                .unwrap()
+                .assume_utc(),
+            deleted_at: None,
+        }
+    }
+
     #[test]
     fn parses_quick_capture_due_and_minutes() {
         let request =
@@ -5971,6 +6215,37 @@ mod tests {
         assert_eq!(request.title, "Review notes");
         assert_eq!(request.due_date, Some(date!(2026 - 06 - 30)));
         assert_eq!(request.estimated_minutes, Some(90));
+    }
+
+    #[test]
+    fn sorts_home_tasks_by_due_estimate_and_importance() {
+        let tasks = vec![
+            test_task("no due", None, Some(60), Some(1), 9),
+            test_task("soon", Some(date!(2026 - 06 - 26)), Some(120), Some(3), 10),
+            test_task("short", Some(date!(2026 - 06 - 27)), Some(15), Some(2), 11),
+        ];
+
+        assert_eq!(
+            sorted_tasks(&tasks, TaskSortMode::DueDate)
+                .iter()
+                .map(|task| task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["soon", "short", "no due"]
+        );
+        assert_eq!(
+            sorted_tasks(&tasks, TaskSortMode::Estimate)
+                .iter()
+                .map(|task| task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["short", "no due", "soon"]
+        );
+        assert_eq!(
+            sorted_tasks(&tasks, TaskSortMode::Importance)
+                .iter()
+                .map(|task| task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["soon", "short", "no due"]
+        );
     }
 
     #[test]

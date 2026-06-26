@@ -16,6 +16,8 @@
 - due date は `YYYY-MM-DD` / `YYYYMMDD` / `today` / `tomorrow` / `tue` などを解釈し、Home ではfloating popupの日付セレクターまたは候補リストから選べる。
 - estimate は `30m` / `1h30m` / `01:30` / `01:30:00` / 分数を解釈し、Home ではfloating popupの固定値・加算ボタンからも選べる。
 - タスク一覧のステータス変更は `Ctrl+Z` / `Ctrl+Shift+Z` で undo / redo できる。
+- Home のタスク一覧は Normal / Compact 表示を Settings で切り替えられる。
+- Home のタスク一覧は due date / estimate / importance / created で sort できる。importance は現状 `cost_points` を使う。
 - Home では完了済みタスクを三角トグルで表示でき、直近10件から追加読み込みできる。完了済みタスクのステータスも変更できる。
 - Home ではタスク行を agenda へドラッグして、manual / locked な ScheduleBlock として保存できる。
 - Home では agenda 上の保存済み ScheduleBlock をドラッグして移動でき、移動後は manual / locked な ScheduleBlock として保存できる。
@@ -31,7 +33,7 @@
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
 - Home の plan 保存時、既存 proposed blocks を置き換える前に確認できる。
 - due date / estimate / schedule 時刻は専用 UI で編集できる。
-- Settings で Vault path、SQLite path、PostgreSQL URL、timezone offset、テーマ、LLM 設定を保存できる。
+- Settings で Vault path、SQLite path、PostgreSQL URL、timezone offset、テーマ、Home task表示、LLM 設定を保存できる。
 - Assistant 画面でタスク作成と、設定済み LLM を使った簡易相談ができる。
 - タスク作成は AutomationLog に `CREATE_TASK` として記録される。
 - Activity 画面で AutomationLog を確認できる。

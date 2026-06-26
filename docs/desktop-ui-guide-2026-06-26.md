@@ -97,6 +97,8 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 主な操作:
 
 - Tasks: 左パネルのタスク一覧。status button、所属、タスク名、期限、見積を表示する。
+- Task density: Settings で Normal / Compact を選べる。Compact は Home のタスク行を詰めて表示する。
+- Task sort: Home の Tasks 見出し右側で Due date / Estimate / Importance / Created を切り替える。Importance は現状 `cost_points` を使う。
 - status button: 二重丸をクリックして status を選ぶ。メニューは status 名だけを表示し、Done 系 status を選ぶと完了扱いになる。
 - status undo / redo: status 変更は `Ctrl+Z` で undo、`Ctrl+Shift+Z` で redo できる。
 - title: タスク名をダブルクリックするとその場で入力欄に変わる。Enter またはフォーカスアウトで保存し、Esc でキャンセルする。
@@ -252,6 +254,7 @@ ScheduleBlock の状態:
 - SQLite / PostgreSQL backend を選ぶ。
 - SQLite DB path や PostgreSQL URL を設定する。
 - Timezone offset を設定する。既定は JST の `+09:00`。`JST` / `Asia/Tokyo` / `UTC` も入力できる。
+- Home task density と既定 sort を設定する。
 - LLM provider と model を設定する。
 - 設定を保存し、再接続する。
 
