@@ -281,6 +281,10 @@ struct DesktopConfig {
     dark_mode: bool,
     #[serde(default = "default_timezone_offset")]
     timezone_offset: String,
+    #[serde(default = "default_availability_start")]
+    availability_start: String,
+    #[serde(default = "default_availability_end")]
+    availability_end: String,
     #[serde(default)]
     home_task_density: TaskListDensity,
     #[serde(default)]
@@ -301,6 +305,8 @@ impl DesktopConfig {
             database_url: DEFAULT_POSTGRES_URL.to_string(),
             dark_mode: default_dark_mode,
             timezone_offset: default_timezone_offset(),
+            availability_start: default_availability_start(),
+            availability_end: default_availability_end(),
             home_task_density: TaskListDensity::Normal,
             home_task_sort: TaskSortMode::DueDate,
             llm_provider: DesktopLlmProvider::Disabled,
@@ -320,6 +326,14 @@ impl DesktopConfig {
 
 fn default_timezone_offset() -> String {
     DEFAULT_TIMEZONE_OFFSET.to_string()
+}
+
+fn default_availability_start() -> String {
+    "09:00".to_string()
+}
+
+fn default_availability_end() -> String {
+    "17:00".to_string()
 }
 
 fn default_timezone() -> UtcOffset {
@@ -600,6 +614,8 @@ struct MnemaGuiApp {
     planning_model: String,
     routine_model: String,
     timezone_offset: String,
+    availability_start: String,
+    availability_end: String,
     view: View,
     last_view: View,
     task_title: String,
@@ -688,6 +704,8 @@ impl MnemaGuiApp {
             planning_model: config.planning_model,
             routine_model: config.routine_model,
             timezone_offset: config.timezone_offset,
+            availability_start: config.availability_start,
+            availability_end: config.availability_end,
             view: View::Home,
             last_view: View::Settings,
             task_title: String::new(),
@@ -1788,7 +1806,7 @@ impl MnemaGuiApp {
                 return;
             }
         };
-        let availability = match default_workday_availability(target_date, timezone) {
+        let availability = match self.workday_availability(target_date, timezone) {
             Ok(availability) => availability,
             Err(error) => {
                 self.set_error(error);
@@ -1873,7 +1891,7 @@ impl MnemaGuiApp {
                 return;
             }
         };
-        let availability = match default_workday_availability(target_date, timezone) {
+        let availability = match self.workday_availability(target_date, timezone) {
             Ok(availability) => availability,
             Err(error) => {
                 self.set_error(error);
@@ -2043,6 +2061,19 @@ impl MnemaGuiApp {
         OffsetDateTime::now_utc().to_offset(self.app_timezone())
     }
 
+    fn workday_availability(
+        &self,
+        date: Date,
+        timezone: UtcOffset,
+    ) -> Result<Vec<mnema_app::AvailabilityWindow>> {
+        workday_availability(
+            date,
+            timezone,
+            &self.availability_start,
+            &self.availability_end,
+        )
+    }
+
     fn selected_project_title(&self) -> Option<String> {
         let selected_id = self.selected_project_id.as_ref()?;
         self.projects
@@ -2056,6 +2087,12 @@ impl MnemaGuiApp {
             self.set_error(error);
             return;
         }
+        if let Err(error) =
+            validate_availability_window(&self.availability_start, &self.availability_end)
+        {
+            self.set_error(error);
+            return;
+        }
         let config = DesktopConfig {
             vault_path: self.normalized_vault_path().display().to_string(),
             storage_backend: self.selected_backend,
@@ -2063,6 +2100,8 @@ impl MnemaGuiApp {
             database_url: self.normalized_database_url(),
             dark_mode: self.dark_mode,
             timezone_offset: self.timezone_offset.trim().to_string(),
+            availability_start: self.availability_start.trim().to_string(),
+            availability_end: self.availability_end.trim().to_string(),
             home_task_density: self.home_task_density,
             home_task_sort: self.home_task_sort,
             llm_provider: self.llm_provider,
@@ -2082,6 +2121,8 @@ impl MnemaGuiApp {
                 self.planning_model = config.planning_model;
                 self.routine_model = config.routine_model;
                 self.timezone_offset = config.timezone_offset;
+                self.availability_start = config.availability_start;
+                self.availability_end = config.availability_end;
                 self.home_task_density = config.home_task_density;
                 self.home_task_sort = config.home_task_sort;
                 self.scroll_home_agenda_to_now = true;
@@ -2811,6 +2852,24 @@ impl MnemaGuiApp {
                     }
                     if ui.button("UTC").clicked() {
                         self.timezone_offset = "+00:00".to_string();
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Planning hours");
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [92.0, INPUT_HEIGHT],
+                        text_field(&mut self.availability_start, "09:00"),
+                    );
+                    ui.label(regular_text("to").color(palette.muted));
+                    ui.add_sized(
+                        [92.0, INPUT_HEIGHT],
+                        text_field(&mut self.availability_end, "17:00"),
+                    );
+                    if ui.button("Default").clicked() {
+                        self.availability_start = default_availability_start();
+                        self.availability_end = default_availability_end();
                     }
                 });
                 ui.end_row();
@@ -5771,9 +5830,24 @@ fn parse_flexible_date(value: &str, today: Date) -> Result<Date> {
 }
 
 fn parse_hm_for_date(value: &str, date: Date, timezone: UtcOffset) -> Result<OffsetDateTime> {
-    let time = Time::parse(value.trim(), format_description!("[hour]:[minute]"))
-        .map_err(|_| anyhow!("時刻は HH:MM で入力してください"))?;
+    let time = parse_hm_time(value)?;
     Ok(date.with_time(time).assume_offset(timezone))
+}
+
+fn parse_hm_time(value: &str) -> Result<Time> {
+    Time::parse(value.trim(), format_description!("[hour]:[minute]"))
+        .map_err(|_| anyhow!("時刻は HH:MM で入力してください"))
+}
+
+fn validate_availability_window(start: &str, end: &str) -> Result<()> {
+    let start = parse_hm_time(start)?;
+    let end = parse_hm_time(end)?;
+    if start >= end {
+        return Err(anyhow!(
+            "Planning hours は開始時刻より後の終了時刻を指定してください"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
@@ -6057,18 +6131,21 @@ fn asks_next_action(value: &str) -> bool {
         || value.contains("何する")
 }
 
-fn default_workday_availability(
+fn workday_availability(
     date: Date,
     timezone: UtcOffset,
+    start_time: &str,
+    end_time: &str,
 ) -> Result<Vec<mnema_app::AvailabilityWindow>> {
+    validate_availability_window(start_time, end_time)?;
     let now = OffsetDateTime::now_utc().to_offset(timezone);
     let today = now.date();
     if date < today {
         return Ok(Vec::new());
     }
 
-    let mut start = date.with_hms(9, 0, 0)?.assume_offset(timezone);
-    let end = date.with_hms(17, 0, 0)?.assume_offset(timezone);
+    let mut start = parse_hm_for_date(start_time, date, timezone)?;
+    let end = parse_hm_for_date(end_time, date, timezone)?;
     if date == today {
         start = start.max(now);
     }
@@ -6294,6 +6371,26 @@ mod tests {
             UtcOffset::from_hms(-5, -30, 0).unwrap()
         );
         assert_eq!(parse_timezone_offset("UTC").unwrap(), UtcOffset::UTC);
+    }
+
+    #[test]
+    fn builds_workday_availability_from_settings() {
+        let timezone = UtcOffset::from_hms(9, 0, 0).unwrap();
+        let target_date = OffsetDateTime::now_utc()
+            .to_offset(timezone)
+            .date()
+            .next_day()
+            .unwrap();
+
+        let availability = workday_availability(target_date, timezone, "10:30", "15:00").unwrap();
+
+        assert_eq!(availability.len(), 1);
+        assert_eq!(
+            format_hm_in(availability[0].window.start, timezone),
+            "10:30"
+        );
+        assert_eq!(format_hm_in(availability[0].window.end, timezone), "15:00");
+        assert!(validate_availability_window("17:00", "09:00").is_err());
     }
 
     #[test]

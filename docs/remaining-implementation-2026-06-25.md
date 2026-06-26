@@ -24,6 +24,7 @@
 - Home 表示時は現在時刻ライン付近へ自動スクロールできる。
 - Home で plan を生成し、ScheduleBlock として自動保存できる。
 - Home の plan は過去日や当日の現在時刻以前には配置しない。
+- Plan / Repair の availability は Settings の Planning hours から設定できる。
 - Home で scheduled / done / active / locked block を固定し、現在時刻以降の proposed block をRepairボタンまたは現在時刻ラインのアイコンから再提案・自動保存できる。
 - Plan / Repair 結果は proposed / unscheduled / issue 件数と issue 内容を表示できる。
 - Plan / Repair / Manual の block は agenda 上で色分けできる。
@@ -33,7 +34,7 @@
 - 保存済み ScheduleBlock を scheduled / done / cancelled に変更でき、開始/終了時刻も編集できる。
 - Home の plan 保存時、既存 proposed blocks を置き換える前に確認できる。
 - due date / estimate / schedule 時刻は専用 UI で編集できる。
-- Settings で Vault path、SQLite path、PostgreSQL URL、timezone offset、テーマ、Home task表示、LLM 設定を保存できる。
+- Settings で Vault path、SQLite path、PostgreSQL URL、timezone offset、Planning hours、テーマ、Home task表示、LLM 設定を保存できる。
 - Assistant 画面でタスク作成と、設定済み LLM を使った簡易相談ができる。
 - タスク作成は AutomationLog に `CREATE_TASK` として記録される。
 - Activity 画面で AutomationLog を確認できる。

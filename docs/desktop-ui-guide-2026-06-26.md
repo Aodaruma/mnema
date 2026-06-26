@@ -127,7 +127,7 @@ Mnema は、思いついたタスクをまず Inbox に入れ、Home で今日�
 
 現状の制限:
 
-- availability は現時点では既定の 9:00-17:00 を使う。ただし過去日には計画せず、当日は現在時刻以降だけを対象にする。
+- availability は Settings の Planning hours を使う。既定は 9:00-17:00。過去日には計画せず、当日は現在時刻以降だけを対象にする。
 - Repair は現在時刻以降の proposed block を置き換える。差分レビュー UI はまだない。
 - 外部カレンダー予定はまだ取り込んでいない。
 
@@ -254,6 +254,7 @@ ScheduleBlock の状態:
 - SQLite / PostgreSQL backend を選ぶ。
 - SQLite DB path や PostgreSQL URL を設定する。
 - Timezone offset を設定する。既定は JST の `+09:00`。`JST` / `Asia/Tokyo` / `UTC` も入力できる。
+- Planning hours を設定する。Plan / Repair はこの時間帯だけに配置する。
 - Home task density と既定 sort を設定する。
 - LLM provider と model を設定する。
 - 設定を保存し、再接続する。
