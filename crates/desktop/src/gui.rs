@@ -5,8 +5,8 @@ use std::{cmp::Reverse, collections::HashSet};
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontDefinitions, FontFamily, RichText, ScrollArea, Stroke,
-    TextEdit,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontTweak, RichText, ScrollArea,
+    Stroke, TextEdit,
 };
 use mnema_app::{
     CaptureTaskRequest, CaptureTaskService, PlanTodayRequest, PlanTodayResult,
@@ -145,6 +145,8 @@ const INPUT_HEIGHT: f32 = 34.0;
 const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
+const TEXT_REGULAR_FONT_FAMILY: &str = "mnema_text_regular";
+const TEXT_BOLD_FONT_FAMILY: &str = "mnema_text_bold";
 const LOGO_FONT_FAMILY: &str = "mnema_logo";
 const MATERIAL_ICON_FONT_FAMILY: &str = "mnema_material_icons";
 const DEFAULT_POSTGRES_URL: &str = "postgres://postgres:postgres@localhost/mnema";
@@ -2909,27 +2911,62 @@ impl Palette {
 
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    let default_proportional = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let mut text_regular_family = default_proportional.clone();
+    let mut text_bold_family = default_proportional;
 
     if let Some(font_bytes) = load_noto_sans_jp() {
-        let font_name = "noto_sans_jp".to_owned();
+        let regular_name = "noto_sans_jp_regular".to_owned();
+        let bold_name = "noto_sans_jp_bold".to_owned();
         fonts.font_data.insert(
-            font_name.clone(),
-            Arc::new(FontData::from_owned(font_bytes)),
+            regular_name.clone(),
+            Arc::new(FontData::from_owned(font_bytes.clone()).tweak(FontTweak {
+                hinting_override: Some(true),
+                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_REGULAR)]),
+                ..Default::default()
+            })),
+        );
+        fonts.font_data.insert(
+            bold_name.clone(),
+            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
+                hinting_override: Some(true),
+                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_BOLD)]),
+                ..Default::default()
+            })),
         );
 
         if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-            family.insert(0, font_name.clone());
+            family.insert(0, regular_name.clone());
         }
         if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-            family.push(font_name);
+            family.push(regular_name.clone());
         }
+        text_regular_family.insert(0, regular_name.clone());
+        text_bold_family.insert(0, bold_name);
+        text_bold_family.push(regular_name);
     }
+    fonts.families.insert(
+        FontFamily::Name(TEXT_REGULAR_FONT_FAMILY.into()),
+        text_regular_family,
+    );
+    fonts.families.insert(
+        FontFamily::Name(TEXT_BOLD_FONT_FAMILY.into()),
+        text_bold_family,
+    );
 
     if let Some(font_bytes) = load_montserrat() {
         let font_name = "montserrat".to_owned();
         fonts.font_data.insert(
             font_name.clone(),
-            Arc::new(FontData::from_owned(font_bytes)),
+            Arc::new(FontData::from_owned(font_bytes).tweak(FontTweak {
+                hinting_override: Some(true),
+                coords: egui::epaint::text::VariationCoords::new([("wght", FONT_WEIGHT_BOLD)]),
+                ..Default::default()
+            })),
         );
         fonts
             .families
@@ -3060,11 +3097,11 @@ fn theme_icon_button(
 }
 
 fn regular_text(text: impl Into<String>) -> RichText {
-    RichText::new(text).variation("wght", FONT_WEIGHT_REGULAR)
+    RichText::new(text).family(FontFamily::Name(TEXT_REGULAR_FONT_FAMILY.into()))
 }
 
 fn bold_text(text: impl Into<String>) -> RichText {
-    regular_text(text).variation("wght", FONT_WEIGHT_BOLD)
+    RichText::new(text).family(FontFamily::Name(TEXT_BOLD_FONT_FAMILY.into()))
 }
 
 fn logo_text(text: impl Into<String>) -> RichText {
