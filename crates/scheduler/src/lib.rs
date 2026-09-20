@@ -4,7 +4,7 @@
 //! existing Mnema tasks into proposed schedule blocks that can later be reviewed
 //! and persisted by application services.
 
-use std::cmp::max;
+use std::cmp::{Ordering, max, min};
 use std::collections::{HashMap, HashSet};
 
 use mnema_core::prelude::*;
@@ -69,6 +69,104 @@ pub struct AvailabilityWindow {
     pub window: TimeWindow,
 }
 
+/// Stable reference to an item that can be placed by the scheduler.
+///
+/// The scheduler deliberately stores only provider-independent domain IDs. It
+/// does not load tasks, expand recurring habits, or persist proposals itself.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ScheduleItemRef {
+    Task(TaskId),
+    HabitOccurrence(HabitOccurrenceId),
+}
+
+impl ScheduleItemRef {
+    #[must_use]
+    pub fn kind(&self) -> ScheduleItemKind {
+        match self {
+            Self::Task(_) => ScheduleItemKind::Task,
+            Self::HabitOccurrence(_) => ScheduleItemKind::HabitOccurrence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduleItemKind {
+    Task,
+    HabitOccurrence,
+}
+
+/// Coarse deterministic allocation tier.
+///
+/// Hard constraints are represented separately as availability and hard-busy
+/// windows. Within the remaining time, required habits are placed first,
+/// followed by flexible habits and ordinary tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScheduleItemTier {
+    RequiredHabit,
+    FlexibleHabit,
+    Task,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulableItem {
+    pub item_ref: ScheduleItemRef,
+    pub kind: ScheduleItemKind,
+    pub tier: ScheduleItemTier,
+    pub title: String,
+    pub duration_minutes: Minutes,
+    pub due: Option<Date>,
+    pub importance: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Empty means unrestricted within global availability. Non-empty windows
+    /// are intersected with global availability and all remaining free slots.
+    pub allowed_windows: Vec<TimeWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedItemScheduleBlock {
+    pub item_ref: ScheduleItemRef,
+    pub kind: ScheduleItemKind,
+    pub tier: ScheduleItemTier,
+    pub title: String,
+    pub window: TimeWindow,
+    pub required_minutes: Minutes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnscheduledItemReason {
+    InvalidDuration,
+    NoAvailability,
+    NoAllowedWindow,
+    InsufficientContiguousTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemScheduleIssue {
+    NoAvailability,
+    ItemUnscheduled {
+        item_ref: ScheduleItemRef,
+        kind: ScheduleItemKind,
+        title: String,
+        required_minutes: Minutes,
+        reason: UnscheduledItemReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemSchedulingInput {
+    pub items: Vec<SchedulableItem>,
+    pub availability: Vec<AvailabilityWindow>,
+    pub hard_busy: Vec<BusyBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemSchedulingOutput {
+    pub blocks: Vec<ProposedItemScheduleBlock>,
+    pub unscheduled: Vec<ScheduleItemRef>,
+    pub issues: Vec<ItemScheduleIssue>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedScheduleBlock {
     pub task_id: TaskId,
@@ -131,47 +229,148 @@ impl GreedyScheduler {
 
     #[must_use]
     pub fn plan(&self, input: SchedulingInput) -> SchedulingOutput {
-        let mut issues = Vec::new();
-        let done_status_ids = done_status_ids(&input.statuses, &input.status_groups);
-        let busy = busy_windows(&input.busy_blocks);
-        let mut free_slots = free_slots(&input.availability, &busy);
-
-        if free_slots.is_empty() {
-            issues.push(ScheduleIssue::NoAvailability);
-        }
-
-        let mut tasks = input
-            .tasks
+        let SchedulingInput {
+            tasks,
+            statuses,
+            status_groups,
+            availability,
+            busy_blocks,
+        } = input;
+        let done_status_ids = done_status_ids(&statuses, &status_groups);
+        let items = tasks
             .into_iter()
             .filter(|task| is_schedulable(task, &done_status_ids))
+            .map(|task| SchedulableItem {
+                item_ref: ScheduleItemRef::Task(task.id.clone()),
+                kind: ScheduleItemKind::Task,
+                tier: ScheduleItemTier::Task,
+                title: task.title.clone(),
+                duration_minutes: self.required_minutes(&task),
+                due: task.due_date,
+                importance: task.cost_points.unwrap_or_default(),
+                created_at: task.created_at,
+                allowed_windows: Vec::new(),
+            })
             .collect::<Vec<_>>();
+        let output = self.plan_items(ItemSchedulingInput {
+            items,
+            availability,
+            hard_busy: busy_blocks,
+        });
 
-        tasks.sort_by(compare_tasks);
+        let blocks = output
+            .blocks
+            .into_iter()
+            .filter_map(|block| match block.item_ref {
+                ScheduleItemRef::Task(task_id) => Some(ProposedScheduleBlock {
+                    task_id,
+                    title: block.title,
+                    window: block.window,
+                    required_minutes: block.required_minutes,
+                }),
+                ScheduleItemRef::HabitOccurrence(_) => None,
+            })
+            .collect();
+        let unscheduled = output
+            .unscheduled
+            .into_iter()
+            .filter_map(|item_ref| match item_ref {
+                ScheduleItemRef::Task(task_id) => Some(task_id),
+                ScheduleItemRef::HabitOccurrence(_) => None,
+            })
+            .collect();
+        let issues = output
+            .issues
+            .into_iter()
+            .filter_map(|issue| match issue {
+                ItemScheduleIssue::NoAvailability => Some(ScheduleIssue::NoAvailability),
+                ItemScheduleIssue::ItemUnscheduled {
+                    item_ref: ScheduleItemRef::Task(task_id),
+                    title,
+                    required_minutes,
+                    ..
+                } => Some(ScheduleIssue::TaskUnscheduled {
+                    task_id,
+                    title,
+                    required_minutes,
+                }),
+                ItemScheduleIssue::ItemUnscheduled {
+                    item_ref: ScheduleItemRef::HabitOccurrence(_),
+                    ..
+                } => None,
+            })
+            .collect();
+
+        SchedulingOutput {
+            blocks,
+            unscheduled,
+            issues,
+        }
+    }
+
+    /// Plans provider-independent tasks and habit occurrences.
+    ///
+    /// Allocation is deterministic: tier, due date, descending importance,
+    /// creation time, title, and finally the stable item ID. Each item is put in
+    /// the earliest remaining contiguous slot that also satisfies its optional
+    /// allowed windows.
+    #[must_use]
+    pub fn plan_items(&self, input: ItemSchedulingInput) -> ItemSchedulingOutput {
+        let ItemSchedulingInput {
+            mut items,
+            availability,
+            hard_busy,
+        } = input;
+        let availability_windows = normalized_availability(&availability);
+        let busy = busy_windows(&hard_busy);
+        let mut free_slots = free_slots(&availability_windows, &busy);
+        let initially_has_free_time = !free_slots.is_empty();
+        let mut issues = Vec::new();
+
+        if !initially_has_free_time {
+            issues.push(ItemScheduleIssue::NoAvailability);
+        }
+
+        items.sort_by(compare_items);
 
         let mut blocks = Vec::new();
         let mut unscheduled = Vec::new();
 
-        for task in tasks {
-            let required_minutes = self.required_minutes(&task);
-            match reserve_first_fit(&mut free_slots, required_minutes) {
-                Some(window) => blocks.push(ProposedScheduleBlock {
-                    task_id: task.id,
-                    title: task.title,
+        for item in items {
+            let window = if item.duration_minutes == 0 {
+                None
+            } else {
+                reserve_first_fit_with_allowed(
+                    &mut free_slots,
+                    item.duration_minutes,
+                    &item.allowed_windows,
+                )
+            };
+
+            if let Some(window) = window {
+                blocks.push(ProposedItemScheduleBlock {
+                    item_ref: item.item_ref,
+                    kind: item.kind,
+                    tier: item.tier,
+                    title: item.title,
                     window,
-                    required_minutes,
-                }),
-                None => {
-                    issues.push(ScheduleIssue::TaskUnscheduled {
-                        task_id: task.id.clone(),
-                        title: task.title,
-                        required_minutes,
-                    });
-                    unscheduled.push(task.id);
-                }
+                    required_minutes: item.duration_minutes,
+                });
+                continue;
             }
+
+            let reason = unscheduled_reason(&item, &availability_windows, initially_has_free_time);
+            issues.push(ItemScheduleIssue::ItemUnscheduled {
+                item_ref: item.item_ref.clone(),
+                kind: item.kind,
+                title: item.title,
+                required_minutes: item.duration_minutes,
+                reason,
+            });
+            unscheduled.push(item.item_ref);
         }
 
-        SchedulingOutput {
+        ItemSchedulingOutput {
             blocks,
             unscheduled,
             issues,
@@ -209,15 +408,35 @@ fn is_schedulable(task: &Task, done_status_ids: &HashSet<StatusId>) -> bool {
     task.deleted_at.is_none() && !done_status_ids.contains(&task.status_id)
 }
 
-fn compare_tasks(a: &Task, b: &Task) -> std::cmp::Ordering {
-    compare_due_dates(a.due_date, b.due_date)
-        .then_with(|| {
-            b.cost_points
-                .unwrap_or_default()
-                .cmp(&a.cost_points.unwrap_or_default())
-        })
+fn compare_items(a: &SchedulableItem, b: &SchedulableItem) -> Ordering {
+    tier_rank(a.tier)
+        .cmp(&tier_rank(b.tier))
+        .then_with(|| compare_due_dates(a.due, b.due))
+        .then_with(|| b.importance.cmp(&a.importance))
         .then_with(|| a.created_at.cmp(&b.created_at))
         .then_with(|| a.title.cmp(&b.title))
+        .then_with(|| compare_item_refs(&a.item_ref, &b.item_ref))
+}
+
+fn tier_rank(tier: ScheduleItemTier) -> u8 {
+    match tier {
+        ScheduleItemTier::RequiredHabit => 0,
+        ScheduleItemTier::FlexibleHabit => 1,
+        ScheduleItemTier::Task => 2,
+    }
+}
+
+fn compare_item_refs(left: &ScheduleItemRef, right: &ScheduleItemRef) -> Ordering {
+    match (left, right) {
+        (ScheduleItemRef::Task(left), ScheduleItemRef::Task(right)) => {
+            left.0.as_bytes().cmp(right.0.as_bytes())
+        }
+        (ScheduleItemRef::Task(_), ScheduleItemRef::HabitOccurrence(_)) => Ordering::Less,
+        (ScheduleItemRef::HabitOccurrence(_), ScheduleItemRef::Task(_)) => Ordering::Greater,
+        (ScheduleItemRef::HabitOccurrence(left), ScheduleItemRef::HabitOccurrence(right)) => {
+            left.0.as_bytes().cmp(right.0.as_bytes())
+        }
+    }
 }
 
 fn compare_due_dates(left: Option<Date>, right: Option<Date>) -> std::cmp::Ordering {
@@ -234,11 +453,20 @@ fn busy_windows(blocks: &[BusyBlock]) -> Vec<TimeWindow> {
     merge_windows(busy)
 }
 
-fn free_slots(availability: &[AvailabilityWindow], busy: &[TimeWindow]) -> Vec<TimeWindow> {
+fn normalized_availability(availability: &[AvailabilityWindow]) -> Vec<TimeWindow> {
+    merge_windows(
+        availability
+            .iter()
+            .map(|availability| availability.window)
+            .collect(),
+    )
+}
+
+fn free_slots(availability: &[TimeWindow], busy: &[TimeWindow]) -> Vec<TimeWindow> {
     let mut result = Vec::new();
 
     for availability_window in availability {
-        let mut slots = vec![availability_window.window];
+        let mut slots = vec![*availability_window];
         for busy_window in busy {
             slots = slots
                 .into_iter()
@@ -250,6 +478,36 @@ fn free_slots(availability: &[AvailabilityWindow], busy: &[TimeWindow]) -> Vec<T
 
     result.sort_by_key(|window| window.start);
     result
+}
+
+fn unscheduled_reason(
+    item: &SchedulableItem,
+    availability: &[TimeWindow],
+    initially_has_free_time: bool,
+) -> UnscheduledItemReason {
+    if item.duration_minutes == 0 {
+        return UnscheduledItemReason::InvalidDuration;
+    }
+    if availability.is_empty() {
+        return UnscheduledItemReason::NoAvailability;
+    }
+    if !item.allowed_windows.is_empty()
+        && !windows_have_intersection(availability, &item.allowed_windows)
+    {
+        return UnscheduledItemReason::NoAllowedWindow;
+    }
+    if !initially_has_free_time {
+        return UnscheduledItemReason::NoAvailability;
+    }
+    UnscheduledItemReason::InsufficientContiguousTime
+}
+
+fn windows_have_intersection(left: &[TimeWindow], right: &[TimeWindow]) -> bool {
+    left.iter().any(|left_window| {
+        right
+            .iter()
+            .any(|right_window| left_window.overlaps(*right_window))
+    })
 }
 
 fn subtract_window(slot: TimeWindow, busy: TimeWindow) -> Vec<TimeWindow> {
@@ -278,13 +536,43 @@ fn reserve_first_fit(free_slots: &mut Vec<TimeWindow>, minutes: Minutes) -> Opti
         slot.start + Duration::minutes(i64::from(minutes)),
     );
 
-    if reserved.end == slot.end {
-        free_slots.remove(index);
-    } else {
-        free_slots[index] = TimeWindow::new(reserved.end, slot.end);
+    consume_free_window(free_slots, index, reserved);
+    Some(reserved)
+}
+
+fn reserve_first_fit_with_allowed(
+    free_slots: &mut Vec<TimeWindow>,
+    minutes: Minutes,
+    allowed_windows: &[TimeWindow],
+) -> Option<TimeWindow> {
+    if allowed_windows.is_empty() {
+        return reserve_first_fit(free_slots, minutes);
     }
 
-    Some(reserved)
+    let allowed_windows = merge_windows(allowed_windows.to_vec());
+    for index in 0..free_slots.len() {
+        let slot = free_slots[index];
+        for allowed in &allowed_windows {
+            let candidate_start = max(slot.start, allowed.start);
+            let candidate_limit = min(slot.end, allowed.end);
+            let candidate_end = candidate_start + Duration::minutes(i64::from(minutes));
+            if candidate_start >= candidate_limit || candidate_end > candidate_limit {
+                continue;
+            }
+
+            let reserved = TimeWindow::new(candidate_start, candidate_end);
+            consume_free_window(free_slots, index, reserved);
+            return Some(reserved);
+        }
+    }
+
+    None
+}
+
+fn consume_free_window(free_slots: &mut Vec<TimeWindow>, index: usize, reserved: TimeWindow) {
+    let slot = free_slots[index];
+    let remaining = subtract_window(slot, reserved);
+    free_slots.splice(index..=index, remaining);
 }
 
 fn merge_windows(mut windows: Vec<TimeWindow>) -> Vec<TimeWindow> {
@@ -375,6 +663,27 @@ mod tests {
                 datetime!(2026-06-25 00:00 UTC) + Duration::hours(i64::from(start_hour)),
                 datetime!(2026-06-25 00:00 UTC) + Duration::hours(i64::from(end_hour)),
             ),
+        }
+    }
+
+    fn schedulable_item(
+        item_ref: ScheduleItemRef,
+        tier: ScheduleItemTier,
+        title: &str,
+        duration_minutes: Minutes,
+        allowed_windows: Vec<TimeWindow>,
+    ) -> SchedulableItem {
+        let kind = item_ref.kind();
+        SchedulableItem {
+            item_ref,
+            kind,
+            tier,
+            title: title.into(),
+            duration_minutes,
+            due: None,
+            importance: 0,
+            created_at: datetime!(2026-06-25 00:00 UTC),
+            allowed_windows,
         }
     }
 
@@ -487,5 +796,344 @@ mod tests {
 
         assert_eq!(output.blocks[0].title, "Earlier");
         assert_eq!(output.blocks[1].title, "Later");
+    }
+
+    #[test]
+    fn plans_tasks_and_habit_occurrences_by_tier() {
+        let task_ref = ScheduleItemRef::Task(TaskId::new());
+        let required_habit_ref = ScheduleItemRef::HabitOccurrence(HabitOccurrenceId::new());
+        let flexible_habit_ref = ScheduleItemRef::HabitOccurrence(HabitOccurrenceId::new());
+        let input = ItemSchedulingInput {
+            items: vec![
+                schedulable_item(task_ref.clone(), ScheduleItemTier::Task, "Task", 30, vec![]),
+                schedulable_item(
+                    flexible_habit_ref.clone(),
+                    ScheduleItemTier::FlexibleHabit,
+                    "Flexible habit",
+                    30,
+                    vec![],
+                ),
+                schedulable_item(
+                    required_habit_ref.clone(),
+                    ScheduleItemTier::RequiredHabit,
+                    "Required habit",
+                    30,
+                    vec![],
+                ),
+            ],
+            availability: vec![availability(9, 11)],
+            hard_busy: vec![],
+        };
+
+        let output = GreedyScheduler::default().plan_items(input);
+
+        assert_eq!(output.blocks.len(), 3);
+        assert_eq!(output.blocks[0].item_ref, required_habit_ref);
+        assert_eq!(output.blocks[1].item_ref, flexible_habit_ref);
+        assert_eq!(output.blocks[2].item_ref, task_ref);
+        assert_eq!(
+            output.blocks[0].window.start,
+            datetime!(2026-06-25 09:00 UTC)
+        );
+        assert!(output.unscheduled.is_empty());
+    }
+
+    #[test]
+    fn respects_hard_busy_across_multiple_availability_windows() {
+        let first_ref = ScheduleItemRef::Task(TaskId::new());
+        let second_ref = ScheduleItemRef::Task(TaskId::new());
+        let input = ItemSchedulingInput {
+            items: vec![
+                schedulable_item(first_ref, ScheduleItemTier::Task, "First", 60, vec![]),
+                schedulable_item(second_ref, ScheduleItemTier::Task, "Second", 60, vec![]),
+            ],
+            // Deliberately unsorted to verify normalization.
+            availability: vec![availability(13, 15), availability(9, 11)],
+            hard_busy: vec![BusyBlock {
+                window: TimeWindow::new(
+                    datetime!(2026-06-25 09:00 UTC),
+                    datetime!(2026-06-25 10:00 UTC),
+                ),
+                source: BusyBlockSource::ExternalCalendar,
+                label: Some("Hard meeting".into()),
+            }],
+        };
+
+        let output = GreedyScheduler::default().plan_items(input);
+        let starts = output
+            .blocks
+            .iter()
+            .map(|block| block.window.start)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            starts,
+            vec![
+                datetime!(2026-06-25 10:00 UTC),
+                datetime!(2026-06-25 13:00 UTC),
+            ]
+        );
+        assert!(
+            output
+                .blocks
+                .iter()
+                .all(|block| !block.window.overlaps(TimeWindow::new(
+                    datetime!(2026-06-25 09:00 UTC),
+                    datetime!(2026-06-25 10:00 UTC),
+                )))
+        );
+    }
+
+    #[test]
+    fn intersects_item_allowed_windows_and_preserves_other_free_time() {
+        let habit_ref = ScheduleItemRef::HabitOccurrence(HabitOccurrenceId::new());
+        let task_ref = ScheduleItemRef::Task(TaskId::new());
+        let input = ItemSchedulingInput {
+            items: vec![
+                schedulable_item(
+                    task_ref.clone(),
+                    ScheduleItemTier::Task,
+                    "Morning task",
+                    60,
+                    vec![],
+                ),
+                schedulable_item(
+                    habit_ref.clone(),
+                    ScheduleItemTier::RequiredHabit,
+                    "Afternoon habit",
+                    60,
+                    vec![TimeWindow::new(
+                        datetime!(2026-06-25 13:00 UTC),
+                        datetime!(2026-06-25 14:00 UTC),
+                    )],
+                ),
+            ],
+            availability: vec![availability(9, 15)],
+            hard_busy: vec![],
+        };
+
+        let output = GreedyScheduler::default().plan_items(input);
+        let habit = output
+            .blocks
+            .iter()
+            .find(|block| block.item_ref == habit_ref)
+            .unwrap();
+        let task = output
+            .blocks
+            .iter()
+            .find(|block| block.item_ref == task_ref)
+            .unwrap();
+
+        assert_eq!(habit.window.start, datetime!(2026-06-25 13:00 UTC));
+        assert_eq!(task.window.start, datetime!(2026-06-25 09:00 UTC));
+    }
+
+    #[test]
+    fn produces_the_same_plan_regardless_of_equal_item_input_order() {
+        let first = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Same",
+            30,
+            vec![],
+        );
+        let second = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Same",
+            30,
+            vec![],
+        );
+        let scheduler = GreedyScheduler::default();
+        let forward = scheduler.plan_items(ItemSchedulingInput {
+            items: vec![first.clone(), second.clone()],
+            availability: vec![availability(9, 10)],
+            hard_busy: vec![],
+        });
+        let reversed = scheduler.plan_items(ItemSchedulingInput {
+            items: vec![second, first],
+            availability: vec![availability(9, 10)],
+            hard_busy: vec![],
+        });
+
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn orders_same_tier_by_due_importance_and_creation_time() {
+        let mut due_first = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Due first",
+            10,
+            vec![],
+        );
+        due_first.due = Some(date!(2026 - 06 - 26));
+        due_first.importance = 0;
+        due_first.created_at = datetime!(2026-06-25 02:00 UTC);
+
+        let mut due_later = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Due later",
+            10,
+            vec![],
+        );
+        due_later.due = Some(date!(2026 - 06 - 27));
+        due_later.importance = 100;
+        due_later.created_at = datetime!(2026-06-25 00:00 UTC);
+
+        let mut important = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Important",
+            10,
+            vec![],
+        );
+        important.importance = 10;
+        important.created_at = datetime!(2026-06-25 02:00 UTC);
+
+        let mut older = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Older",
+            10,
+            vec![],
+        );
+        older.importance = 5;
+        older.created_at = datetime!(2026-06-25 00:00 UTC);
+
+        let mut newer = schedulable_item(
+            ScheduleItemRef::Task(TaskId::new()),
+            ScheduleItemTier::Task,
+            "Newer",
+            10,
+            vec![],
+        );
+        newer.importance = 5;
+        newer.created_at = datetime!(2026-06-25 01:00 UTC);
+
+        let expected = vec![
+            due_first.item_ref.clone(),
+            due_later.item_ref.clone(),
+            important.item_ref.clone(),
+            older.item_ref.clone(),
+            newer.item_ref.clone(),
+        ];
+        let output = GreedyScheduler::default().plan_items(ItemSchedulingInput {
+            items: vec![newer, older, important, due_later, due_first],
+            availability: vec![availability(9, 11)],
+            hard_busy: vec![],
+        });
+
+        assert_eq!(
+            output
+                .blocks
+                .into_iter()
+                .map(|block| block.item_ref)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn reports_specific_unscheduled_reasons() {
+        let invalid_ref = ScheduleItemRef::Task(TaskId::new());
+        let outside_ref = ScheduleItemRef::HabitOccurrence(HabitOccurrenceId::new());
+        let too_long_ref = ScheduleItemRef::Task(TaskId::new());
+        let output = GreedyScheduler::default().plan_items(ItemSchedulingInput {
+            items: vec![
+                schedulable_item(
+                    invalid_ref.clone(),
+                    ScheduleItemTier::Task,
+                    "Invalid",
+                    0,
+                    vec![],
+                ),
+                schedulable_item(
+                    outside_ref.clone(),
+                    ScheduleItemTier::FlexibleHabit,
+                    "Outside",
+                    30,
+                    vec![TimeWindow::new(
+                        datetime!(2026-06-25 12:00 UTC),
+                        datetime!(2026-06-25 13:00 UTC),
+                    )],
+                ),
+                schedulable_item(
+                    too_long_ref.clone(),
+                    ScheduleItemTier::Task,
+                    "Too long",
+                    90,
+                    vec![],
+                ),
+            ],
+            availability: vec![availability(9, 10)],
+            hard_busy: vec![],
+        });
+
+        let reason_for = |item_ref: &ScheduleItemRef| {
+            output.issues.iter().find_map(|issue| match issue {
+                ItemScheduleIssue::ItemUnscheduled {
+                    item_ref: issue_ref,
+                    reason,
+                    ..
+                } if issue_ref == item_ref => Some(*reason),
+                _ => None,
+            })
+        };
+
+        assert_eq!(
+            reason_for(&invalid_ref),
+            Some(UnscheduledItemReason::InvalidDuration)
+        );
+        assert_eq!(
+            reason_for(&outside_ref),
+            Some(UnscheduledItemReason::NoAllowedWindow)
+        );
+        assert_eq!(
+            reason_for(&too_long_ref),
+            Some(UnscheduledItemReason::InsufficientContiguousTime)
+        );
+        assert_eq!(output.unscheduled.len(), 3);
+    }
+
+    #[test]
+    fn reports_no_availability_when_hard_busy_covers_everything() {
+        let item_ref = ScheduleItemRef::Task(TaskId::new());
+        let output = GreedyScheduler::default().plan_items(ItemSchedulingInput {
+            items: vec![schedulable_item(
+                item_ref.clone(),
+                ScheduleItemTier::Task,
+                "Blocked",
+                30,
+                vec![],
+            )],
+            availability: vec![availability(9, 10)],
+            hard_busy: vec![BusyBlock {
+                window: TimeWindow::new(
+                    datetime!(2026-06-25 09:00 UTC),
+                    datetime!(2026-06-25 10:00 UTC),
+                ),
+                source: BusyBlockSource::LockedSchedule,
+                label: None,
+            }],
+        });
+
+        assert!(output.blocks.is_empty());
+        assert!(
+            output
+                .issues
+                .iter()
+                .any(|issue| matches!(issue, ItemScheduleIssue::NoAvailability))
+        );
+        assert!(output.issues.iter().any(|issue| matches!(
+            issue,
+            ItemScheduleIssue::ItemUnscheduled {
+                item_ref: issue_ref,
+                reason: UnscheduledItemReason::NoAvailability,
+                ..
+            } if issue_ref == &item_ref
+        )));
     }
 }

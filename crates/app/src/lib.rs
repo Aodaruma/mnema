@@ -1,5 +1,16 @@
 //! Application services that connect Mnema domain repositories to pure logic.
 
+pub mod auto_schedule;
+pub mod automation_runner;
+pub mod habit_service;
+pub mod plan_diff;
+pub mod travel;
+pub use auto_schedule::*;
+pub use automation_runner::*;
+pub use habit_service::*;
+pub use plan_diff::*;
+pub use travel::*;
+
 use std::collections::{HashMap, HashSet};
 
 use mnema_core::prelude::*;
@@ -9,8 +20,10 @@ use thiserror::Error;
 use time::{Date, OffsetDateTime};
 
 pub use mnema_scheduler::{
-    AvailabilityWindow, BusyBlock, BusyBlockSource, GreedyScheduler, ProposedScheduleBlock,
-    ScheduleIssue, SchedulerConfig, SchedulingInput, TimeWindow,
+    AvailabilityWindow, BusyBlock, BusyBlockSource, GreedyScheduler, ItemScheduleIssue,
+    ItemSchedulingInput, ItemSchedulingOutput, ProposedItemScheduleBlock, ProposedScheduleBlock,
+    SchedulableItem, ScheduleIssue, ScheduleItemKind, ScheduleItemRef, ScheduleItemTier,
+    SchedulerConfig, SchedulingInput, TimeWindow, UnscheduledItemReason,
 };
 
 #[derive(Debug, Error)]
@@ -31,6 +44,36 @@ pub enum AppError {
     MissingDoneStatus,
     #[error("task title is required")]
     EmptyTaskTitle,
+    #[error("habit not found")]
+    HabitNotFound,
+    #[error("habit occurrence not found")]
+    HabitOccurrenceNotFound,
+    #[error("invalid habit: {0}")]
+    InvalidHabit(String),
+    #[error("invalid habit occurrence: {0}")]
+    InvalidHabitOccurrence(String),
+    #[error("date range start must be before end")]
+    InvalidDateRange,
+    #[error("date range overflow")]
+    DateRangeOverflow,
+    #[error("scheduling preferences are not configured")]
+    MissingSchedulingPreferences,
+    #[error("invalid scheduling preferences: {0}")]
+    InvalidSchedulingPreferences(String),
+    #[error("IANA timezone is invalid: {0}")]
+    InvalidTimezone(String),
+    #[error("local time does not exist in {timezone}: {date} {time}")]
+    InvalidLocalTime {
+        timezone: String,
+        date: Date,
+        time: time::Time,
+    },
+    #[error("named hours policy not found: {0}")]
+    NamedHoursNotFound(String),
+    #[error("schedule preview is stale; create a new preview")]
+    StaleSchedulePreview,
+    #[error("schedule apply could not restore occurrence state after failure: {0}")]
+    ScheduleApplyInconsistent(String),
 }
 
 impl From<CoreError> for AppError {
