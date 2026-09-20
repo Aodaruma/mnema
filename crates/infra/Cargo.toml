@@ -11,6 +11,7 @@ mnema-core = { path = "../core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
+time-tz = "2"
 uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -34,6 +35,19 @@ sqlx = { version = "0.8.6", features = [
 
 # HTTP クライアント(LLM / 将来の同期 API 用)
 reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
+
+# OAuth PKCE and OS-backed credential persistence. Explicit platform features
+# keep keyring v3 usable on Windows, macOS, and desktop Linux.
+base64 = "0.22"
+sha2 = "0.10"
+aes-gcm = "0.10"
+zeroize = "1"
+keyring = { version = "3.6.3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
 
 # 設定ファイルなどで TOML を読む場合に使う
 toml = "0.9.8"
