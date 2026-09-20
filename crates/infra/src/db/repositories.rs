@@ -4,6 +4,8 @@ use sqlx::{PgPool, Row, SqlitePool};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, OffsetDateTime};
 
+use super::sqlite_time::to_sqlite_timestamp;
+
 fn status_group_kind_to_str(kind: &StatusGroupKind) -> &'static str {
     match kind {
         StatusGroupKind::NotStarted => "NOT_STARTED",
@@ -73,7 +75,7 @@ fn milestone_status_from_str(s: &str) -> MilestoneStatus {
 }
 
 fn to_rfc3339(dt: OffsetDateTime) -> Result<String> {
-    dt.format(&Rfc3339).map_err(Into::into)
+    to_sqlite_timestamp(dt)
 }
 
 fn from_rfc3339(s: &str) -> Result<OffsetDateTime> {
@@ -193,6 +195,13 @@ fn schedule_block_source_from_str(value: &str) -> ScheduleBlockSource {
 
 fn map_storage_err(e: impl ToString) -> CoreError {
     CoreError::Storage(e.to_string())
+}
+
+fn optional_minutes_to_postgres_integer(value: Option<u32>) -> CoreResult<Option<i32>> {
+    value
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| CoreError::Storage("required_minutes exceeds PostgreSQL INTEGER range".into()))
 }
 
 fn day_bounds(day: Date) -> Result<(OffsetDateTime, OffsetDateTime)> {
@@ -905,6 +914,34 @@ impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
             .collect()
     }
 
+    async fn list_overlapping(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> CoreResult<Vec<ScheduleBlock>> {
+        if start >= end {
+            return Err(CoreError::Storage("invalid overlap range".into()));
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM schedule_blocks
+            WHERE start_at < $1 AND end_at > $2
+            ORDER BY start_at, end_at, title_snapshot
+            "#,
+        )
+        .bind(end)
+        .bind(start)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_schedule_block)
+            .map(|result| result.map_err(map_storage_err))
+            .collect()
+    }
+
     async fn replace_proposed_for_day(
         &self,
         day: Date,
@@ -918,6 +955,7 @@ impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
             DELETE FROM schedule_blocks
             WHERE source IN ('SCHEDULER', 'REPAIR')
               AND state = 'PROPOSED'
+              AND locked = false
               AND start_at >= $1
               AND start_at < $2
         "#,
@@ -935,19 +973,71 @@ impl ScheduleBlockRepository for PostgresScheduleBlockRepository {
         tx.commit().await.map_err(map_storage_err)?;
         Ok(())
     }
+
+    async fn replace_proposed_in_range(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        blocks: Vec<ScheduleBlock>,
+    ) -> CoreResult<()> {
+        if start >= end {
+            return Err(CoreError::Storage("invalid replacement range".into()));
+        }
+        let mut tx = self.pool.begin().await.map_err(map_storage_err)?;
+        let retained_ids = blocks
+            .iter()
+            .map(|block| block.id.0)
+            .collect::<std::collections::HashSet<_>>();
+
+        for block in blocks {
+            insert_schedule_block_in_tx(&mut tx, block).await?;
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id FROM schedule_blocks
+            WHERE source IN ('SCHEDULER', 'REPAIR')
+              AND state = 'PROPOSED'
+              AND locked = false
+              AND start_at < $1
+              AND end_at > $2
+            "#,
+        )
+        .bind(end)
+        .bind(start)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_storage_err)?;
+
+        for row in rows {
+            let id = row
+                .try_get::<uuid::Uuid, _>("id")
+                .map_err(map_storage_err)?;
+            if !retained_ids.contains(&id) {
+                sqlx::query("DELETE FROM schedule_blocks WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_storage_err)?;
+            }
+        }
+        tx.commit().await.map_err(map_storage_err)?;
+        Ok(())
+    }
 }
 
 async fn insert_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResult<()> {
     sqlx::query(
         r#"
         INSERT INTO schedule_blocks (
-            id, task_id, title_snapshot, start_at, end_at, block_type,
-            state, locked, source, required_minutes, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            id, task_id, habit_occurrence_id, title_snapshot, start_at, end_at,
+            block_type, state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     "#,
     )
     .bind(block.id.0)
     .bind(block.task_id.map(|id| id.0))
+    .bind(block.habit_occurrence_id.map(|id| id.0))
     .bind(block.title_snapshot)
     .bind(block.start_at)
     .bind(block.end_at)
@@ -955,7 +1045,9 @@ async fn insert_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResul
     .bind(schedule_block_state_to_str(&block.state))
     .bind(block.locked)
     .bind(schedule_block_source_to_str(&block.source))
-    .bind(block.required_minutes.map(i64::from))
+    .bind(optional_minutes_to_postgres_integer(
+        block.required_minutes,
+    )?)
     .bind(block.created_at)
     .bind(block.updated_at)
     .execute(pool)
@@ -969,20 +1061,22 @@ async fn update_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResul
         r#"
         UPDATE schedule_blocks SET
             task_id = $1,
-            title_snapshot = $2,
-            start_at = $3,
-            end_at = $4,
-            block_type = $5,
-            state = $6,
-            locked = $7,
-            source = $8,
-            required_minutes = $9,
-            created_at = $10,
-            updated_at = $11
-        WHERE id = $12
+            habit_occurrence_id = $2,
+            title_snapshot = $3,
+            start_at = $4,
+            end_at = $5,
+            block_type = $6,
+            state = $7,
+            locked = $8,
+            source = $9,
+            required_minutes = $10,
+            created_at = $11,
+            updated_at = $12
+        WHERE id = $13
     "#,
     )
     .bind(block.task_id.map(|id| id.0))
+    .bind(block.habit_occurrence_id.map(|id| id.0))
     .bind(block.title_snapshot)
     .bind(block.start_at)
     .bind(block.end_at)
@@ -990,7 +1084,9 @@ async fn update_schedule_block(pool: &PgPool, block: ScheduleBlock) -> CoreResul
     .bind(schedule_block_state_to_str(&block.state))
     .bind(block.locked)
     .bind(schedule_block_source_to_str(&block.source))
-    .bind(block.required_minutes.map(i64::from))
+    .bind(optional_minutes_to_postgres_integer(
+        block.required_minutes,
+    )?)
     .bind(block.created_at)
     .bind(block.updated_at)
     .bind(block.id.0)
@@ -1010,13 +1106,26 @@ async fn insert_schedule_block_in_tx(
     sqlx::query(
         r#"
         INSERT INTO schedule_blocks (
-            id, task_id, title_snapshot, start_at, end_at, block_type,
-            state, locked, source, required_minutes, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            id, task_id, habit_occurrence_id, title_snapshot, start_at, end_at,
+            block_type, state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT(id) DO UPDATE SET
+            task_id = excluded.task_id,
+            habit_occurrence_id = excluded.habit_occurrence_id,
+            title_snapshot = excluded.title_snapshot,
+            start_at = excluded.start_at,
+            end_at = excluded.end_at,
+            block_type = excluded.block_type,
+            state = excluded.state,
+            locked = excluded.locked,
+            source = excluded.source,
+            required_minutes = excluded.required_minutes,
+            updated_at = excluded.updated_at
     "#,
     )
     .bind(block.id.0)
     .bind(block.task_id.map(|id| id.0))
+    .bind(block.habit_occurrence_id.map(|id| id.0))
     .bind(block.title_snapshot)
     .bind(block.start_at)
     .bind(block.end_at)
@@ -1024,7 +1133,9 @@ async fn insert_schedule_block_in_tx(
     .bind(schedule_block_state_to_str(&block.state))
     .bind(block.locked)
     .bind(schedule_block_source_to_str(&block.source))
-    .bind(block.required_minutes.map(i64::from))
+    .bind(optional_minutes_to_postgres_integer(
+        block.required_minutes,
+    )?)
     .bind(block.created_at)
     .bind(block.updated_at)
     .execute(&mut **tx)
@@ -1043,6 +1154,9 @@ fn row_to_schedule_block(row: sqlx::postgres::PgRow) -> Result<ScheduleBlock> {
         task_id: row
             .try_get::<Option<uuid::Uuid>, _>("task_id")?
             .map(TaskId::from),
+        habit_occurrence_id: row
+            .try_get::<Option<uuid::Uuid>, _>("habit_occurrence_id")?
+            .map(HabitOccurrenceId::from),
         title_snapshot: row.try_get("title_snapshot")?,
         start_at: row.try_get("start_at")?,
         end_at: row.try_get("end_at")?,
@@ -1051,8 +1165,9 @@ fn row_to_schedule_block(row: sqlx::postgres::PgRow) -> Result<ScheduleBlock> {
         locked: row.try_get("locked")?,
         source: schedule_block_source_from_str(&source),
         required_minutes: row
-            .try_get::<Option<i64>, _>("required_minutes")?
-            .map(|value| value as u32),
+            .try_get::<Option<i32>, _>("required_minutes")?
+            .map(u32::try_from)
+            .transpose()?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1951,6 +2066,34 @@ impl ScheduleBlockRepository for SqliteScheduleBlockRepository {
             .collect()
     }
 
+    async fn list_overlapping(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> CoreResult<Vec<ScheduleBlock>> {
+        if start >= end {
+            return Err(CoreError::Storage("invalid overlap range".into()));
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM schedule_blocks
+            WHERE start_at < ? AND end_at > ?
+            ORDER BY start_at, end_at, title_snapshot
+            "#,
+        )
+        .bind(to_rfc3339(end).map_err(map_storage_err)?)
+        .bind(to_rfc3339(start).map_err(map_storage_err)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_storage_err)?;
+
+        rows.into_iter()
+            .map(row_to_schedule_block_sqlite)
+            .map(|result| result.map_err(map_storage_err))
+            .collect()
+    }
+
     async fn replace_proposed_for_day(
         &self,
         day: Date,
@@ -1964,6 +2107,7 @@ impl ScheduleBlockRepository for SqliteScheduleBlockRepository {
             DELETE FROM schedule_blocks
             WHERE source IN ('SCHEDULER', 'REPAIR')
               AND state = 'PROPOSED'
+              AND locked = 0
               AND start_at >= ?
               AND start_at < ?
         "#,
@@ -1981,19 +2125,69 @@ impl ScheduleBlockRepository for SqliteScheduleBlockRepository {
         tx.commit().await.map_err(map_storage_err)?;
         Ok(())
     }
+
+    async fn replace_proposed_in_range(
+        &self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        blocks: Vec<ScheduleBlock>,
+    ) -> CoreResult<()> {
+        if start >= end {
+            return Err(CoreError::Storage("invalid replacement range".into()));
+        }
+        let mut tx = self.pool.begin().await.map_err(map_storage_err)?;
+        let retained_ids = blocks
+            .iter()
+            .map(|block| block.id.0.to_string())
+            .collect::<std::collections::HashSet<_>>();
+
+        for block in blocks {
+            insert_schedule_block_sqlite_in_tx(&mut tx, block).await?;
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id FROM schedule_blocks
+            WHERE source IN ('SCHEDULER', 'REPAIR')
+              AND state = 'PROPOSED'
+              AND locked = 0
+              AND start_at < ?
+              AND end_at > ?
+            "#,
+        )
+        .bind(to_rfc3339(end).map_err(map_storage_err)?)
+        .bind(to_rfc3339(start).map_err(map_storage_err)?)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_storage_err)?;
+
+        for row in rows {
+            let id = row.try_get::<String, _>("id").map_err(map_storage_err)?;
+            if !retained_ids.contains(&id) {
+                sqlx::query("DELETE FROM schedule_blocks WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_storage_err)?;
+            }
+        }
+        tx.commit().await.map_err(map_storage_err)?;
+        Ok(())
+    }
 }
 
 async fn insert_schedule_block_sqlite(pool: &SqlitePool, block: ScheduleBlock) -> CoreResult<()> {
     sqlx::query(
         r#"
         INSERT INTO schedule_blocks (
-            id, task_id, title_snapshot, start_at, end_at, block_type,
-            state, locked, source, required_minutes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, task_id, habit_occurrence_id, title_snapshot, start_at, end_at,
+            block_type, state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     "#,
     )
     .bind(block.id.0.to_string())
     .bind(block.task_id.map(|id| id.0.to_string()))
+    .bind(block.habit_occurrence_id.map(|id| id.0.to_string()))
     .bind(block.title_snapshot)
     .bind(to_rfc3339(block.start_at).map_err(map_storage_err)?)
     .bind(to_rfc3339(block.end_at).map_err(map_storage_err)?)
@@ -2015,6 +2209,7 @@ async fn update_schedule_block_sqlite(pool: &SqlitePool, block: ScheduleBlock) -
         r#"
         UPDATE schedule_blocks SET
             task_id = ?,
+            habit_occurrence_id = ?,
             title_snapshot = ?,
             start_at = ?,
             end_at = ?,
@@ -2029,6 +2224,7 @@ async fn update_schedule_block_sqlite(pool: &SqlitePool, block: ScheduleBlock) -
     "#,
     )
     .bind(block.task_id.map(|id| id.0.to_string()))
+    .bind(block.habit_occurrence_id.map(|id| id.0.to_string()))
     .bind(block.title_snapshot)
     .bind(to_rfc3339(block.start_at).map_err(map_storage_err)?)
     .bind(to_rfc3339(block.end_at).map_err(map_storage_err)?)
@@ -2056,13 +2252,26 @@ async fn insert_schedule_block_sqlite_in_tx(
     sqlx::query(
         r#"
         INSERT INTO schedule_blocks (
-            id, task_id, title_snapshot, start_at, end_at, block_type,
-            state, locked, source, required_minutes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, task_id, habit_occurrence_id, title_snapshot, start_at, end_at,
+            block_type, state, locked, source, required_minutes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            task_id = excluded.task_id,
+            habit_occurrence_id = excluded.habit_occurrence_id,
+            title_snapshot = excluded.title_snapshot,
+            start_at = excluded.start_at,
+            end_at = excluded.end_at,
+            block_type = excluded.block_type,
+            state = excluded.state,
+            locked = excluded.locked,
+            source = excluded.source,
+            required_minutes = excluded.required_minutes,
+            updated_at = excluded.updated_at
     "#,
     )
     .bind(block.id.0.to_string())
     .bind(block.task_id.map(|id| id.0.to_string()))
+    .bind(block.habit_occurrence_id.map(|id| id.0.to_string()))
     .bind(block.title_snapshot)
     .bind(to_rfc3339(block.start_at).map_err(map_storage_err)?)
     .bind(to_rfc3339(block.end_at).map_err(map_storage_err)?)
@@ -2091,6 +2300,11 @@ fn row_to_schedule_block_sqlite(row: sqlx::sqlite::SqliteRow) -> Result<Schedule
             .map(|s| uuid::Uuid::parse_str(&s))
             .transpose()?
             .map(TaskId::from),
+        habit_occurrence_id: row
+            .try_get::<Option<String>, _>("habit_occurrence_id")?
+            .map(|s| uuid::Uuid::parse_str(&s))
+            .transpose()?
+            .map(HabitOccurrenceId::from),
         title_snapshot: row.try_get("title_snapshot")?,
         start_at: from_rfc3339(&row.try_get::<String, _>("start_at")?)?,
         end_at: from_rfc3339(&row.try_get::<String, _>("end_at")?)?,

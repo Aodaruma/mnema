@@ -2,19 +2,14 @@ use crate::ids::UserId;
 use serde::{Deserialize, Serialize};
 use time::Time;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AutomationLevel {
     Off,
+    #[default]
     Ask,
     AutoWithReview,
     AutoSilent,
-}
-
-impl Default for AutomationLevel {
-    fn default() -> Self {
-        AutomationLevel::Ask
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +21,7 @@ pub enum AutomationFeature {
     WeeklyReview,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationSettings {
     pub inbox_classify: AutomationLevel,
     pub due_suggestion: AutomationLevel,
@@ -34,44 +29,19 @@ pub struct AutomationSettings {
     pub weekly_review: AutomationLevel,
 }
 
-impl Default for AutomationSettings {
-    fn default() -> Self {
-        AutomationSettings {
-            inbox_classify: AutomationLevel::Ask,
-            due_suggestion: AutomationLevel::Ask,
-            schedule_generation: AutomationLevel::Ask,
-            weekly_review: AutomationLevel::Ask,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeeklyReviewSettings {
     pub scheduled_time: Option<Time>,
     pub template: Option<String>,
 }
 
-impl Default for WeeklyReviewSettings {
-    fn default() -> Self {
-        WeeklyReviewSettings {
-            scheduled_time: None,
-            template: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
+    #[default]
     Local,
     OpenAiCompatible,
     Other(String),
-}
-
-impl Default for LlmProvider {
-    fn default() -> Self {
-        LlmProvider::Local
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1963,6 +1963,7 @@ impl MnemaGuiApp {
         let block = ScheduleBlock {
             id: ScheduleBlockId::new(),
             task_id: Some(request.task_id),
+            habit_occurrence_id: None,
             title_snapshot: Some(request.title),
             start_at: request.start_at,
             end_at: request.start_at + duration,

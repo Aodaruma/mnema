@@ -1,4 +1,4 @@
-use crate::ids::{ScheduleBlockId, TaskId};
+use crate::ids::{HabitOccurrenceId, ScheduleBlockId, TaskId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -35,6 +35,7 @@ pub enum ScheduleBlockSource {
 pub struct ScheduleBlock {
     pub id: ScheduleBlockId,
     pub task_id: Option<TaskId>,
+    pub habit_occurrence_id: Option<HabitOccurrenceId>,
     pub title_snapshot: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub start_at: OffsetDateTime,

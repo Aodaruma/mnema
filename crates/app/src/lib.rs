@@ -359,6 +359,7 @@ impl<'a> SchedulePlanStoreService<'a> {
             .map(|block| ScheduleBlock {
                 id: ScheduleBlockId::new(),
                 task_id: Some(block.task_id.clone()),
+                habit_occurrence_id: None,
                 title_snapshot: Some(block.title.clone()),
                 start_at: block.window.start,
                 end_at: block.window.end,
@@ -1101,6 +1102,7 @@ mod tests {
         let block = ScheduleBlock {
             id: ScheduleBlockId::new(),
             task_id: None,
+            habit_occurrence_id: None,
             title_snapshot: Some("Plan".into()),
             start_at: datetime!(2026-06-25 09:00 UTC),
             end_at: datetime!(2026-06-25 09:30 UTC),
@@ -1135,6 +1137,7 @@ mod tests {
         let block = ScheduleBlock {
             id: ScheduleBlockId::new(),
             task_id: None,
+            habit_occurrence_id: None,
             title_snapshot: Some("Plan".into()),
             start_at: datetime!(2026-06-25 09:00 UTC),
             end_at: datetime!(2026-06-25 09:30 UTC),
@@ -1231,6 +1234,7 @@ mod tests {
                 ScheduleBlock {
                     id: ScheduleBlockId::new(),
                     task_id: Some(fixed_task_id),
+                    habit_occurrence_id: None,
                     title_snapshot: Some("Already scheduled".into()),
                     start_at: datetime!(2026-06-25 09:00 UTC),
                     end_at: datetime!(2026-06-25 09:30 UTC),
@@ -1245,6 +1249,7 @@ mod tests {
                 ScheduleBlock {
                     id: ScheduleBlockId::new(),
                     task_id: Some(repair_task_id.clone()),
+                    habit_occurrence_id: None,
                     title_snapshot: Some("Repair me".into()),
                     start_at: datetime!(2026-06-25 09:30 UTC),
                     end_at: datetime!(2026-06-25 10:00 UTC),

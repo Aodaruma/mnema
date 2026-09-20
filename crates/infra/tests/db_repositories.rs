@@ -115,9 +115,11 @@ async fn user_settings_upsert_and_get() -> anyhow::Result<()> {
     let vault = test_vault().await?;
     let repo = vault.user_settings_repo();
 
-    let mut settings = UserSettings::default();
-    settings.provider = LlmProvider::OpenAiCompatible;
-    settings.model_for_planning = Some("gpt-4.1".into());
+    let mut settings = UserSettings {
+        provider: LlmProvider::OpenAiCompatible,
+        model_for_planning: Some("gpt-4.1".into()),
+        ..UserSettings::default()
+    };
 
     repo.upsert(settings.clone()).await?;
     let user_id = settings.user_id.clone();
@@ -146,6 +148,7 @@ async fn schedule_block_replace_and_list_for_day() -> anyhow::Result<()> {
     let block = ScheduleBlock {
         id: ScheduleBlockId::new(),
         task_id: None,
+        habit_occurrence_id: None,
         title_snapshot: Some("Proposed block".into()),
         start_at,
         end_at,

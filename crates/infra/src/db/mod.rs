@@ -5,8 +5,11 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use mnema_core::prelude::{
-    AutomationLogRepository, ListRepository, MilestoneRepository, ProjectRepository,
-    ScheduleBlockRepository, StatusRepository, TaskRepository, UserSettingsRepository,
+    AutomationLogRepository, CalendarAccountRepository, CalendarSyncCursorRepository,
+    ExternalEventRepository, HabitOccurrenceRepository, HabitRepository, ListRepository,
+    ManagedCalendarEventLinkRepository, MilestoneRepository, ProjectRepository,
+    ScheduleBlockRepository, SchedulingPreferencesRepository, StatusRepository, TaskRepository,
+    UserSettingsRepository,
 };
 use sqlx::{
     PgPool, Postgres, SqlitePool, migrate::MigrateDatabase, postgres::PgPoolOptions,
@@ -15,6 +18,8 @@ use sqlx::{
 
 mod defaults;
 mod repositories;
+mod scheduling_repositories;
+mod sqlite_time;
 
 pub use repositories::{
     PostgresAutomationLogRepository, PostgresListRepository, PostgresMilestoneRepository,
@@ -23,6 +28,14 @@ pub use repositories::{
     SqliteListRepository, SqliteMilestoneRepository, SqliteProjectRepository,
     SqliteScheduleBlockRepository, SqliteStatusRepository, SqliteTaskRepository,
     SqliteUserSettingsRepository,
+};
+pub use scheduling_repositories::{
+    PostgresCalendarAccountRepository, PostgresCalendarSyncCursorRepository,
+    PostgresExternalEventRepository, PostgresHabitOccurrenceRepository, PostgresHabitRepository,
+    PostgresManagedCalendarEventLinkRepository, PostgresSchedulingPreferencesRepository,
+    SqliteCalendarAccountRepository, SqliteCalendarSyncCursorRepository,
+    SqliteExternalEventRepository, SqliteHabitOccurrenceRepository, SqliteHabitRepository,
+    SqliteManagedCalendarEventLinkRepository, SqliteSchedulingPreferencesRepository,
 };
 
 const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost/mnema";
@@ -215,6 +228,79 @@ impl Vault {
             }
         }
     }
+
+    pub fn calendar_account_repo(&self) -> CalendarAccountRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteCalendarAccountRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresCalendarAccountRepository::new(pool.clone()))
+            }
+        }
+    }
+
+    pub fn external_event_repo(&self) -> ExternalEventRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteExternalEventRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresExternalEventRepository::new(pool.clone()))
+            }
+        }
+    }
+
+    pub fn calendar_sync_cursor_repo(&self) -> CalendarSyncCursorRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteCalendarSyncCursorRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresCalendarSyncCursorRepository::new(pool.clone()))
+            }
+        }
+    }
+
+    pub fn managed_calendar_event_link_repo(&self) -> ManagedCalendarEventLinkRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteManagedCalendarEventLinkRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => Arc::new(
+                PostgresManagedCalendarEventLinkRepository::new(pool.clone()),
+            ),
+        }
+    }
+
+    pub fn habit_repo(&self) -> HabitRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => Arc::new(SqliteHabitRepository::new(pool.clone())),
+            VaultDatabase::Postgres(pool) => Arc::new(PostgresHabitRepository::new(pool.clone())),
+        }
+    }
+
+    pub fn habit_occurrence_repo(&self) -> HabitOccurrenceRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteHabitOccurrenceRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresHabitOccurrenceRepository::new(pool.clone()))
+            }
+        }
+    }
+
+    pub fn scheduling_preferences_repo(&self) -> SchedulingPreferencesRepo {
+        match &self.database {
+            VaultDatabase::Sqlite(pool) => {
+                Arc::new(SqliteSchedulingPreferencesRepository::new(pool.clone()))
+            }
+            VaultDatabase::Postgres(pool) => {
+                Arc::new(PostgresSchedulingPreferencesRepository::new(pool.clone()))
+            }
+        }
+    }
 }
 
 fn default_sqlite_path() -> PathBuf {
@@ -242,3 +328,10 @@ pub type StatusRepo = Arc<dyn StatusRepository>;
 pub type ScheduleBlockRepo = Arc<dyn ScheduleBlockRepository>;
 pub type UserSettingsRepo = Arc<dyn UserSettingsRepository>;
 pub type AutomationLogRepo = Arc<dyn AutomationLogRepository>;
+pub type CalendarAccountRepo = Arc<dyn CalendarAccountRepository>;
+pub type ExternalEventRepo = Arc<dyn ExternalEventRepository>;
+pub type CalendarSyncCursorRepo = Arc<dyn CalendarSyncCursorRepository>;
+pub type ManagedCalendarEventLinkRepo = Arc<dyn ManagedCalendarEventLinkRepository>;
+pub type HabitRepo = Arc<dyn HabitRepository>;
+pub type HabitOccurrenceRepo = Arc<dyn HabitOccurrenceRepository>;
+pub type SchedulingPreferencesRepo = Arc<dyn SchedulingPreferencesRepository>;
