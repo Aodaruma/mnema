@@ -11,8 +11,9 @@ proactively reviews it with you.
 * Project-based views (list, board, calendar, Gantt)
 * A customizable, proactive “secretary” agent as your interface
 
-> Status: **early design / prototyping phase**.
-> APIs, structure, and technologies may change quickly.
+> Status: **Scheduling MVP alpha (S0-S3 implemented)**.
+> CLI, desktop, REST/Web, Google Calendar, Habits, life/sleep hours, travel buffers,
+> and reviewed preview/apply are available. See `docs/development-plan.md`.
 
 ---
 
@@ -155,6 +156,19 @@ You can try the scheduler without a database:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+Try the headless Scheduling MVP:
+
+```bash
+cargo run -p mnema-cli -- --help
+cargo run -p mnema-cli -- hours set --timezone Asia/Tokyo --work-start 09:00 --work-end 17:00 --sleep-start 23:00 --sleep-end 07:00 --travel-minutes 15
+cargo run -p mnema-cli -- habit add "Morning walk" --minutes 30 --earliest 07:00 --latest 09:00
+cargo run -p mnema-cli -- task add "Write proposal" --due 2026-08-20 --minutes 60
+cargo run -p mnema-cli -- plan preview --days 7 --timezone Asia/Tokyo
+```
+
+`plan apply` requires the fingerprint printed by preview. See `calendar --help`
+and `crates/server/README.md` for Google Calendar and credential setup.
+
 Launch the current desktop GUI:
 
 ```bash
@@ -180,6 +194,16 @@ Then run:
 .\dist\mnema-desktop-windows\run-mnema.ps1
 ```
 
+Launch the REST API and responsive Web GUI:
+
+```bash
+cargo run -p mnema-server
+```
+
+Open `http://127.0.0.1:8080`. Docker users can run
+`docker compose -f deploy/compose.yaml up --build`. Put the server behind an
+authenticated TLS reverse proxy before exposing it beyond loopback.
+
 With the default SQLite backend:
 
 ```bash
@@ -202,12 +226,16 @@ mnema/
   CONTRIBUTING.md
   LICENSE
   docs/
+    development-plan.md
     specification-v0.1.md
   crates/
     core/         # domain models, services
     scheduler/    # deterministic planning and schedule proposal logic
+    app/           # use cases and application services
     infra/        # DB, LLM clients, sync
-    desktop/      # desktop app / CLI (egui + eframe)
+    desktop/      # desktop GUI (egui + eframe)
+    cli/          # headless scheduling CLI
+    server/       # REST API, worker, and embedded Web GUI
 ```
 
 ---
@@ -216,6 +244,7 @@ mnema/
 
 * Design / specification (early draft):
 
+  * `docs/development-plan.md` (active short-term roadmap)
   * `docs/specification-v0.1.md`
   * `docs/desktop-runbook-2026-06-26.md`
 

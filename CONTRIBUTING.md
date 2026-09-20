@@ -20,6 +20,7 @@ Mnema is:
 
 For more details about the current design, see:
 
+- `docs/development-plan.md` (active short-term roadmap)
 - `docs/specification-v0.1.md`
 
 ## How to contribute

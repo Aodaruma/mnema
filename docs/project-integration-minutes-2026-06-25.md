@@ -2,6 +2,9 @@
 
 作成日: 2026-06-25
 
+> **追記（2026-08-14）:** この議事録の設計原則は維持しますが、Habit と
+> Calendar を後続とした優先順位は `docs/development-plan.md` により更新されました。
+
 ## 背景
 
 `mnema` と、新規案である `resched-repo-skeleton/resched` はどちらも個人向けのタスク・計画支援を扱う。

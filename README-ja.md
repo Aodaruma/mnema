@@ -14,8 +14,9 @@ Mnema は、ローカルファーストで動く **AI agent付きタスク管理
 - プロジェクト単位のビュー（リスト・ボード・カレンダー・ガント）
 - ユーザーの代わりに気づき・提案・通知を行う AI エージェントをインターフェイスとして利用
 
-> ステータス: **初期設計 / プロトタイピング中**  
-> 実装、構成、採用技術は今後大きく変わる可能性があります。
+> ステータス: **Scheduling MVP alpha（S0〜S3 実装済み）**
+> CLI、デスクトップ、REST/Web、Google Calendar、Habit、生活時間・睡眠、移動バッファ、preview/apply を提供します。
+> 現行の開発順と完了条件は `docs/development-plan.md` を参照してください。
 
 ---
 
@@ -133,6 +134,18 @@ DB なしでスケジューラのデモを確認する場合:
 cargo run -p mnema-desktop -- --demo-plan
 ```
 
+Scheduling MVP のCLIを確認する場合:
+
+```bash
+cargo run -p mnema-cli -- --help
+cargo run -p mnema-cli -- hours set --timezone Asia/Tokyo --work-start 09:00 --work-end 17:00 --sleep-start 23:00 --sleep-end 07:00 --travel-minutes 15
+cargo run -p mnema-cli -- habit add "Morning walk" --minutes 30 --earliest 07:00 --latest 09:00
+cargo run -p mnema-cli -- task add "Write proposal" --due 2026-08-20 --minutes 60
+cargo run -p mnema-cli -- plan preview --days 7 --timezone Asia/Tokyo
+```
+
+`plan apply` はpreviewが表示した `fingerprint` を必須とし、確認していない差分の保存を防ぎます。Google Calendarは `calendar --help`、詳しい設定と資格情報の保存方法は `crates/server/README.md` を参照してください。
+
 現在のデスクトップGUIを起動する場合:
 
 ```bash
@@ -157,6 +170,14 @@ Windows では、開発用ランチャーからも起動できる:
 .\dist\mnema-desktop-windows\run-mnema.ps1
 ```
 
+REST API とresponsive Web GUIを起動する場合:
+
+```bash
+cargo run -p mnema-server
+```
+
+起動後に `http://127.0.0.1:8080` を開きます。Dockerでは `docker compose -f deploy/compose.yaml up --build` を利用できます。外部公開時は、認証とTLSを備えたreverse proxyの背後へ配置してください。
+
 既定の SQLite backend で試す場合:
 
 ```bash
@@ -179,12 +200,16 @@ mnema/
   CONTRIBUTING.md
   LICENSE
   docs/
+    development-plan.md
     specification-v0.1.md
   crates/
     core/         # ドメインモデル・サービス
     scheduler/    # 決定的な計画生成・スケジュール提案ロジック
+    app/           # ユースケース・アプリケーションサービス
     infra/        # DB, LLM クライアント, 同期周り
-    desktop/      # デスクトップアプリ / CLI（egui + eframe）
+    desktop/      # デスクトップGUI（egui + eframe）
+    cli/          # headless Scheduling CLI
+    server/       # REST API、定期worker、埋め込みWeb GUI
 ```
 
 ------
@@ -192,6 +217,7 @@ mnema/
 ## ドキュメント
 
 - 設計・仕様（ドラフト）:
+  - `docs/development-plan.md`（現在の短期計画）
   - `docs/specification-v0.1.md`
   - `docs/desktop-runbook-2026-06-26.md`
 

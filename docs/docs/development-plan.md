@@ -1,5 +1,8 @@
 # Mnema Development Plan (v0.1)
 
+> **Historical snapshot (2026-06-25).** The active implementation order and
+> acceptance criteria are now defined in `../development-plan.md`.
+
 > This document is for **AI-assisted / vibe coding**.
 > Use it as a source of prompts and direction when asking Codex / ChatGPT to write code.
 
