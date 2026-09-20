@@ -1,0 +1,9 @@
+.git
+.vscode
+**/target
+dist
+vault
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ja" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Mnema — 今日を静かに整えるローカルファースト・プランナー" />
+    <title>Mnema</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=0.0.1-s3" />
+  </head>
+  <body>
+    <a class="skip-link" href="#view">本文へ移動</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="メインナビゲーション">
+        <a class="brand" href="#home" aria-label="Mnema Home">
+          <span class="brand-mark" aria-hidden="true">M</span>
+          <span class="brand-copy">
+            <strong>Mnema</strong>
+            <small>Personal planner</small>
+          </span>
+        </a>
+
+        <nav class="primary-nav">
+          <a class="nav-item" href="#home" data-route="home">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>
+            <span>Home</span>
+          </a>
+          <a class="nav-item" href="#inbox" data-route="inbox">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14l2 10v6H3v-6zm.4 10h4.1a2.5 2.5 0 0 0 5 0h4.1L17.4 6H6.6z"/></svg>
+            <span>Inbox</span>
+          </a>
+          <a class="nav-item" href="#schedule" data-route="schedule">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h2v2h8V2h2v2h3v18H3V4h3zm13 8H5v10h14zM7 12h4v3H7zm6 0h4v3h-4z"/></svg>
+            <span>Schedule</span>
+          </a>
+          <a class="nav-item" href="#calendar" data-route="calendar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h2v2h8V2h2v2h3v18H3V4h3zm13 8H5v10h14zM7 12h3v3H7zm5 0h5v2h-5z"/></svg>
+            <span>Calendar</span>
+          </a>
+          <a class="nav-item" href="#habits" data-route="habits">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c4 3 7 6.2 7 11a7 7 0 1 1-14 0c0-3.4 2.2-6.1 5-8.5V10l3-2zm0 18a5 5 0 0 0 5-5c0-2.3-1.2-4.2-3-6v4l-4 2v-5.8c-1.8 1.8-3 3.6-3 5.8a5 5 0 0 0 5 5z"/></svg>
+            <span>Habits</span>
+          </a>
+          <a class="nav-item" href="#settings" data-route="settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.8 2 .5 2a8 8 0 0 1 3.4 0l.5-2 2.3 1-.9 1.9a8 8 0 0 1 2.4 2.4l1.9-.9 1 2.3-2 .5a8 8 0 0 1 0 3.4l2 .5-1 2.3-1.9-.9a8 8 0 0 1-2.4 2.4l.9 1.9-2.3 1-.5-2a8 8 0 0 1-3.4 0l-.5 2-2.3-1 .9-1.9A8 8 0 0 1 6 14.5l-1.9.9-1-2.3 2-.5a8 8 0 0 1 0-3.4l-2-.5 1-2.3 1.9.9a8 8 0 0 1 2.4-2.4L7.5 3zm2.2 5.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z"/></svg>
+            <span>Settings</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="connection-chip" id="connection-chip" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>接続確認中</span>
+          </div>
+          <p>Carry no tasks<br />in your head.</p>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="view-eyebrow">TODAY</p>
+            <h1 id="view-title" tabindex="-1">今日を整える</h1>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="refresh-button" type="button" aria-label="更新" title="更新">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.7 7.3A8 8 0 1 0 20 15h-2.1a6 6 0 1 1-.7-6.3L14 12h8V4z"/></svg>
+            </button>
+            <button class="icon-button" id="theme-button" type="button" aria-label="ダークテーマ" aria-pressed="false" title="テーマ切り替え">
+              <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 1h2v3h-2zm0 19h2v3h-2zM3.5 2.1 5.6 4.2 4.2 5.6 2.1 3.5zm14.9 16.3 2.1 2.1-1.4 1.4-2.1-2.1zM1 11h3v2H1zm19 0h3v2h-3zM4.2 18.4l1.4 1.4-2.1 2.1-1.4-1.4zM18.4 5.6 17 4.2l2.1-2.1 1.4 1.4zM12 6a6 6 0 1 1 0 12 6 6 0 0 1 0-12z"/></svg>
+            </button>
+            <button class="button button-primary add-task-button" type="button" data-action="new-task">
+              <span aria-hidden="true">＋</span>
+              タスクを追加
+            </button>
+          </div>
+        </header>
+
+        <main id="view" class="view" tabindex="-1" aria-busy="true">
+          <div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span><span>Mnema を準備しています</span></div>
+        </main>
+      </section>
+    </div>
+
+    <dialog id="task-dialog" class="task-dialog" aria-labelledby="task-dialog-title">
+      <form id="task-form">
+        <input type="hidden" name="id" />
+        <div class="dialog-head">
+          <div>
+            <p class="eyebrow">INBOX</p>
+            <h2 id="task-dialog-title">タスクを追加</h2>
+          </div>
+          <button class="icon-button" type="button" data-action="close-dialog" aria-label="閉じる">×</button>
+        </div>
+        <label class="field field-wide">
+          <span>タスク名</span>
+          <input name="title" type="text" maxlength="240" required autofocus placeholder="例: 企画書の初稿を作る" />
+        </label>
+        <label class="field field-wide">
+          <span>メモ <small>任意</small></span>
+          <textarea name="description" rows="3" placeholder="必要な背景や完了条件"></textarea>
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>期限 <small>任意</small></span>
+            <input name="due_date" type="date" />
+          </label>
+          <label class="field">
+            <span>見積（分） <small>任意</small></span>
+            <input name="estimated_minutes" type="number" min="1" max="10080" step="1" placeholder="30" />
+          </label>
+        </div>
+        <label class="check-field edit-only" hidden>
+          <input name="completed" type="checkbox" />
+          <span>完了済みにする</span>
+        </label>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-action="close-dialog">キャンセル</button>
+          <button class="button button-primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="habit-dialog" class="task-dialog" aria-labelledby="habit-dialog-title">
+      <form id="habit-form">
+        <input type="hidden" name="id" />
+        <div class="dialog-head">
+          <div><p class="eyebrow">REPEAT</p><h2 id="habit-dialog-title">Habit を追加</h2></div>
+          <button class="icon-button" type="button" data-action="close-habit-dialog" aria-label="閉じる">×</button>
+        </div>
+        <label class="field field-wide"><span>Habit 名</span><input name="title" required maxlength="160" autofocus placeholder="例: 30分歩く" /></label>
+        <div class="field-row">
+          <label class="field"><span>頻度</span><select name="scheduleKind"><option value="DAILY">毎日</option><option value="WEEKDAYS">曜日指定</option></select></label>
+          <label class="field"><span>所要時間（分）</span><input name="durationMinutes" type="number" min="1" max="1440" value="30" required /></label>
+        </div>
+        <fieldset class="weekday-picker" data-weekday-picker>
+          <legend>曜日（曜日指定時）</legend>
+          <label><input type="checkbox" name="weekdays" value="MONDAY" checked />月</label>
+          <label><input type="checkbox" name="weekdays" value="TUESDAY" checked />火</label>
+          <label><input type="checkbox" name="weekdays" value="WEDNESDAY" checked />水</label>
+          <label><input type="checkbox" name="weekdays" value="THURSDAY" checked />木</label>
+          <label><input type="checkbox" name="weekdays" value="FRIDAY" checked />金</label>
+          <label><input type="checkbox" name="weekdays" value="SATURDAY" />土</label>
+          <label><input type="checkbox" name="weekdays" value="SUNDAY" />日</label>
+        </fieldset>
+        <div class="field-row">
+          <label class="field"><span>希望開始 <small>任意</small></span><input name="preferredStart" type="time" /></label>
+          <label class="field"><span>希望終了 <small>任意</small></span><input name="preferredEnd" type="time" /></label>
+        </div>
+        <label class="field field-wide"><span>柔軟性</span><select name="flexibility"><option value="FLEXIBLE">空き時間で調整</option><option value="REQUIRED">必ず確保</option></select></label>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-action="close-habit-dialog">キャンセル</button>
+          <button class="button button-primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/assets/js/app.js?v=0.0.1-s3"></script>
+  </body>
+</html>

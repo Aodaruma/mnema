@@ -1,0 +1,26 @@
+services:
+  mnema:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      MNEMA_SERVER_ADDR: "0.0.0.0:8080"
+      MNEMA_STORAGE_BACKEND: "sqlite"
+      MNEMA_VAULT_PATH: "/data/vault"
+      MNEMA_SQLITE_PATH: "/data/mnema.sqlite"
+      MNEMA_TIMEZONE: "Asia/Tokyo"
+      MNEMA_TIMEZONE_OFFSET: "+09:00"
+      MNEMA_PLANNING_START: "09:00"
+      MNEMA_PLANNING_END: "17:00"
+      MNEMA_WEB_REFRESH_SECONDS: "30"
+      MNEMA_AUTOMATION_MODE: "off"
+      MNEMA_AUTOMATION_INTERVAL_SECONDS: "0"
+      RUST_LOG: "mnema_server=info"
+    volumes:
+      - mnema-data:/data
+    restart: unless-stopped
+
+volumes:
+  mnema-data:
