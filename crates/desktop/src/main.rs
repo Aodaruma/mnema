@@ -13,6 +13,7 @@ use time::{
 };
 
 mod gui;
+mod scheduling_ui;
 
 fn main() -> anyhow::Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
