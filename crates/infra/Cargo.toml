@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
 time-tz = "2"
+iana-time-zone = "0.1.65"
 uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
