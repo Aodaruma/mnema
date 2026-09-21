@@ -70,8 +70,7 @@ async fn run_pipeline(state: &AppState) -> WorkerRunSummary {
         return summary.failed("date range overflowed");
     };
 
-    // Calendar synchronization is best-effort. A provider failure must not
-    // discard the last successfully persisted ExternalEvent snapshot.
+    // Preserve cached data for display, but do not plan against a failed sync.
     let accounts = match enabled_calendar_accounts(state).await {
         Ok(accounts) => accounts,
         Err(error) => {
@@ -105,10 +104,14 @@ async fn run_pipeline(state: &AppState) -> WorkerRunSummary {
                     account_id = %account.id.0,
                     status = %error.status,
                     error = %error.message,
-                    "calendar sync failed; continuing with last persisted snapshot"
+                    "calendar sync failed; automatic planning will be skipped"
                 );
             }
         }
+    }
+
+    if summary.sync_failures > 0 {
+        return summary.failed("calendar sync failed; planning and write-back skipped");
     }
 
     let request = AutoScheduleRequest {

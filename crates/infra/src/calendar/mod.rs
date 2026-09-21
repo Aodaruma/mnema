@@ -1,7 +1,9 @@
 mod credentials;
+pub mod desktop_oauth;
 mod encrypted_credentials;
 mod google;
 mod oauth;
+pub mod service;
 
 use mnema_core::prelude::*;
 use serde::{Deserialize, Serialize};
