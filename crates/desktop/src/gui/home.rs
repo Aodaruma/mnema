@@ -36,6 +36,26 @@ impl MnemaGuiApp {
                     );
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                         theme_toggle(ui, &mut self.dark_mode, palette);
+                        ui.push_id("background_indicator", |ui| {
+                            if self.background.busy() {
+                                ui.spinner();
+                            }
+                            if self.background.suggestion.is_some()
+                                && components::button(ui, "新しい計画案", false, palette).clicked()
+                            {
+                                self.view = View::Settings;
+                                self.workspace_ui.settings_section =
+                                    pages::SettingsSection::Planning;
+                            }
+                            if let Some(error) = &self.background.error {
+                                ui.label(
+                                    regular_text("同期・計画を確認")
+                                        .size(12.0)
+                                        .color(palette.warning),
+                                )
+                                .on_hover_text(error);
+                            }
+                        });
                     });
                 });
             });

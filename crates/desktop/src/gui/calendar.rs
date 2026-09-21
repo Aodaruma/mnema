@@ -535,6 +535,13 @@ impl MnemaGuiApp {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.set_min_width(270.0);
+                if self.background.busy() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("同期・計画を処理中…");
+                    });
+                    ui.disable();
+                }
                 ui.label(bold_text("自動スケジューリング"));
                 ui.label(
                     regular_text("計画する期間（カレンダーの表示日数とは別）")

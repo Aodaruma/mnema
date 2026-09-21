@@ -650,6 +650,7 @@ impl MnemaGuiApp {
                     });
                 }
                 SettingsSection::Planning => {
+                    settings_card(ui, "自動同期・提案", palette, |ui| { self.show_background_controls(ui, palette); });
                     settings_card(ui, "タイムゾーン", palette, |ui| {
                         let mut mode = self.timezone_mode;
                         ui.horizontal(|ui| {
@@ -834,6 +835,7 @@ impl MnemaGuiApp {
     pub(super) fn persist_ui_preferences(&mut self) {
         let mut config = DesktopConfig::load(self.normalized_vault_path(), self.dark_mode);
         config.dark_mode = self.dark_mode;
+        config.background_enabled = self.background_enabled;
         config.home_task_density = self.home_task_density;
         config.home_task_sort = self.home_task_sort;
         config.task_grouping = self.workspace_ui.task_grouping;

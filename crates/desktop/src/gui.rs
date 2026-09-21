@@ -34,6 +34,7 @@ use crate::scheduling_ui::{
     normalize_selected_calendar_ids,
 };
 
+mod background;
 mod calendar;
 mod components;
 mod date_picker;
@@ -238,6 +239,8 @@ enum DesktopLlmProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
+    #[serde(default = "background_enabled_default")]
+    background_enabled: bool,
     vault_path: String,
     storage_backend: DesktopStorageBackend,
     sqlite_path: String,
@@ -268,9 +271,14 @@ struct DesktopConfig {
     read_notifications: Vec<AutomationLogId>,
 }
 
+fn background_enabled_default() -> bool {
+    true
+}
+
 impl DesktopConfig {
     fn load(initial_vault_path: PathBuf, default_dark_mode: bool) -> Self {
         let fallback = Self {
+            background_enabled: true,
             vault_path: initial_vault_path.display().to_string(),
             storage_backend: DesktopStorageBackend::Sqlite,
             sqlite_path: default_sqlite_path().display().to_string(),
@@ -574,6 +582,8 @@ fn menu_theme(dark_mode: bool) -> muda::MenuTheme {
 }
 
 struct MnemaGuiApp {
+    background: background::BackgroundState,
+    background_enabled: bool,
     runtime: Runtime,
     vault_path: String,
     vault: Option<Vault>,
@@ -690,6 +700,8 @@ impl MnemaGuiApp {
         let today = now.date().to_string();
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
         let mut app = Self {
+            background: background::BackgroundState::default(),
+            background_enabled: config.background_enabled,
             runtime,
             vault_path: config.vault_path,
             vault: None,
@@ -781,6 +793,11 @@ impl MnemaGuiApp {
     }
 
     fn connect_and_refresh(&mut self) {
+        if self.background.busy() {
+            self.settings_message = "処理完了後にもう一度接続してください。".into();
+            return;
+        }
+        self.background = background::BackgroundState::default();
         let path = self.normalized_vault_path();
         let selected_backend = self.selected_backend;
         let sqlite_path = self.normalized_sqlite_path();
@@ -1691,6 +1708,7 @@ impl MnemaGuiApp {
                 self.auto_preview = None;
                 self.calendar_selection_edits.remove(&account_id);
                 self.refresh_calendar_accounts();
+                self.background.wake_for_sync();
             }
             Err(error) => self.set_error(error),
         }
@@ -2064,43 +2082,15 @@ impl MnemaGuiApp {
             end_date_exclusive,
             timezone: self.timezone_offset.trim().to_owned(),
             named_hours: vec!["work".into()],
-            not_before: None,
+            not_before: (start_date <= self.now_in_timezone().date()
+                && self.now_in_timezone().date() < end_date_exclusive)
+                .then(OffsetDateTime::now_utc),
         };
-        let result = self.runtime.block_on(async move {
-            let tasks = vault.task_repo();
-            let statuses = vault.status_repo();
-            let blocks = vault.schedule_block_repo();
-            let events = vault.external_event_repo();
-            let habits = vault.habit_repo();
-            let occurrences = vault.habit_occurrence_repo();
-            let preferences = vault.scheduling_preferences_repo();
-            AutoScheduleService::new(
-                tasks.as_ref(),
-                statuses.as_ref(),
-                blocks.as_ref(),
-                events.as_ref(),
-                habits.as_ref(),
-                occurrences.as_ref(),
-                preferences.as_ref(),
-            )
-            .preview(request)
-            .await
-            .map_err(Into::into)
+        self.start_background_job(async move {
+            Ok(background::Output::Preview(
+                background::preview(&vault, request).await?,
+            ))
         });
-        match result {
-            Ok(preview) => {
-                let proposed = preview.output.blocks.len();
-                let unscheduled = preview.output.unscheduled.len();
-                let changed = preview.diff.changed_count();
-                self.plan = None;
-                self.message = format!(
-                    "Preview: {proposed}件配置 / {unscheduled}件未配置 / {changed}件変更（未保存）"
-                );
-                self.auto_preview = Some(preview);
-                self.error = None;
-            }
-            Err(error) => self.set_error(error),
-        }
     }
 
     fn apply_auto_schedule(&mut self) {
@@ -2111,39 +2101,12 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
-        let fingerprint = preview.diff.fingerprint.clone();
-        let result = self.runtime.block_on(async move {
-            let tasks = vault.task_repo();
-            let statuses = vault.status_repo();
-            let blocks = vault.schedule_block_repo();
-            let events = vault.external_event_repo();
-            let habits = vault.habit_repo();
-            let occurrences = vault.habit_occurrence_repo();
-            let preferences = vault.scheduling_preferences_repo();
-            AutoScheduleService::new(
-                tasks.as_ref(),
-                statuses.as_ref(),
-                blocks.as_ref(),
-                events.as_ref(),
-                habits.as_ref(),
-                occurrences.as_ref(),
-                preferences.as_ref(),
-            )
-            .apply(&preview, &fingerprint)
-            .await
-            .map_err(Into::into)
-        });
-        match result {
-            Ok(applied) => {
-                self.message =
-                    format!("{}件の自動スケジュールを保存しました", applied.blocks.len());
-                self.auto_preview = None;
-                self.error = None;
-                self.refresh_schedule();
-                self.refresh_schedule_month();
-                self.refresh_habits();
-            }
-            Err(error) => self.set_error(error),
+        if self.start_background_job(async move {
+            Ok(background::Output::Applied(
+                background::apply(&vault, &preview).await?,
+            ))
+        }) {
+            self.background.applying = true;
         }
     }
 
@@ -2297,6 +2260,7 @@ impl MnemaGuiApp {
             return;
         }
         let config = DesktopConfig {
+            background_enabled: self.background_enabled,
             vault_path: self.normalized_vault_path().display().to_string(),
             storage_backend: self.selected_backend,
             sqlite_path: self.normalized_sqlite_path().display().to_string(),
@@ -2439,8 +2403,10 @@ impl eframe::App for MnemaGuiApp {
             self.home_task_sort,
             self.workspace_ui.task_grouping,
         );
-        self.handle_native_menu(ui.ctx());
-        self.handle_keyboard_shortcuts(ui.ctx());
+        if !self.background.applying {
+            self.handle_native_menu(ui.ctx());
+            self.handle_keyboard_shortcuts(ui.ctx());
+        }
 
         let dark_factor = if self.dark_mode { 1.0 } else { 0.0 };
         if self.workspace_ui.applied_dark_mode != Some(self.dark_mode) {
@@ -2449,10 +2415,15 @@ impl eframe::App for MnemaGuiApp {
         }
         let palette = Palette::at(dark_factor);
 
-        self.show_shell(ui, palette);
-        self.show_task_details(ui.ctx(), palette);
-        self.show_calendar_event_details(ui.ctx(), palette);
-        self.show_task_capture(ui.ctx(), palette);
+        self.poll_background(ui.ctx());
+        ui.add_enabled_ui(!self.background.applying, |ui| {
+            self.show_shell(ui, palette);
+        });
+        if !self.background.applying {
+            self.show_task_details(ui.ctx(), palette);
+            self.show_calendar_event_details(ui.ctx(), palette);
+            self.show_task_capture(ui.ctx(), palette);
+        }
         self.automatic_refresh(ui.ctx());
         if appearance
             != (
@@ -2469,38 +2440,36 @@ impl eframe::App for MnemaGuiApp {
 
 impl MnemaGuiApp {
     fn show_calendar(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Calendar", palette);
-        let mut refresh = false;
+        section_header(ui, "カレンダー連携", palette);
         ui.horizontal(|ui| {
             ui.label(
-                regular_text("接続カレンダーは予定のhard busyとして自動計画へ反映されます。")
+                regular_text("接続したカレンダーの予定を避けて、タスクを計画します。")
                     .color(palette.muted),
             );
-            if ui.button("Refresh status").clicked() {
-                refresh = true;
-            }
         });
         ui.add_space(10.0);
 
+        self.show_background_controls(ui, palette);
+        ui.add_space(12.0);
+        ui.add_enabled_ui(!self.background.busy(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if components::button(ui, "Googleに接続（読み取り）", true, palette).clicked()
+                {
+                    self.connect_google(ui.ctx(), CalendarAccessMode::ReadOnly);
+                }
+                if components::button(ui, "Googleに接続（予定の書き出しも許可）", false, palette)
+                    .clicked()
+                {
+                    self.connect_google(ui.ctx(), CalendarAccessMode::ReadWrite);
+                }
+            });
+        });
         if self.calendar_accounts.is_empty() {
-            egui::Frame::new()
-                .fill(palette.surface)
-                .stroke(Stroke::new(1.0_f32, palette.border))
-                .corner_radius(10.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.label(bold_text("No calendar connected").color(palette.section));
-                    ui.label(
-                        regular_text("Google OAuth接続はWebサーバーのSettingsから開始できます。")
-                            .color(palette.muted),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.monospace("http://127.0.0.1:8080/#settings");
-                        if ui.button("Copy Web URL").clicked() {
-                            ui.ctx().copy_text("http://127.0.0.1:8080/#settings".into());
-                        }
-                    });
-                });
+            ui.add_space(12.0);
+            ui.label(
+                regular_text("Googleにログインすると、この画面で取り込むカレンダーを選べます。")
+                    .color(palette.muted),
+            );
         } else {
             let accounts = self.calendar_accounts.clone();
             let mut save_account_id = None;
@@ -2540,28 +2509,66 @@ impl MnemaGuiApp {
                                 .unwrap_or("not selected")
                         ));
                         ui.add_space(6.0);
-                        ui.label(bold_text("Busy calendars").size(13.0));
-                        ui.label(
-                            regular_text(
-                                "予定をhard busyとして扱うcalendar IDをカンマ区切りで入力します。Managed calendarは自動的に除外されます。",
-                            )
-                            .color(palette.muted),
-                        );
-                        ui.horizontal(|ui| {
+                        ui.add_enabled_ui(!self.background.busy(), |ui| {
+                            if account.access_mode == CalendarAccessMode::ReadWrite {
+                                if account.managed_calendar_id.is_none() {
+                                    if components::button(
+                                        ui,
+                                        "Mnema専用カレンダーを作成",
+                                        false,
+                                        palette,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.create_managed_calendar(account.clone());
+                                    }
+                                } else if components::button(
+                                    ui,
+                                    "保存済みの7日間の予定をGoogleに反映",
+                                    false,
+                                    palette,
+                                )
+                                .clicked()
+                                {
+                                    self.writeback_calendar(account.clone());
+                                }
+                            }
+                            ui.label(bold_text("取り込むカレンダー").size(13.0));
                             let editor = self
                                 .calendar_selection_edits
                                 .entry(account.id.clone())
                                 .or_insert_with(|| selected_calendar_ids.join(", "));
-                            ui.add_sized(
-                                [460.0, INPUT_HEIGHT],
-                                text_field(editor, "primary, team@example.com"),
-                            );
-                            if ui.button("Save calendars").clicked() {
+                            if let Some(calendars) = self.background.calendars.get(&account.id) {
+                                let mut selected = normalize_selected_calendar_ids(
+                                    editor,
+                                    account.managed_calendar_id.as_deref(),
+                                );
+                                for calendar in calendars.iter().filter(|calendar| {
+                                    account.managed_calendar_id.as_deref()
+                                        != Some(calendar.id.as_str())
+                                }) {
+                                    let mut checked = selected.contains(&calendar.id);
+                                    if ui.checkbox(&mut checked, &calendar.summary).changed() {
+                                        if checked {
+                                            selected.push(calendar.id.clone());
+                                        } else {
+                                            selected.retain(|id| id != &calendar.id);
+                                        }
+                                    }
+                                }
+                                *editor = selected.join(", ");
+                            } else {
+                                ui.add_sized(
+                                    [ui.available_width(), INPUT_HEIGHT],
+                                    text_field(editor, "カレンダーID"),
+                                );
+                            }
+                            if components::button(ui, "選択を保存", false, palette).clicked() {
                                 save_account_id = Some(account.id.clone());
                             }
                         });
                         ui.add_space(4.0);
-                        ui.label(bold_text("Sync status").size(13.0));
+                        ui.label(bold_text("同期状況").size(13.0));
                         if selected_calendar_ids.is_empty() {
                             ui.label(regular_text("No calendars selected").color(palette.warning));
                         }
@@ -2586,11 +2593,7 @@ impl MnemaGuiApp {
             }
             if let Some(account_id) = save_account_id {
                 self.save_calendar_selection(account_id);
-                refresh = false;
             }
-        }
-        if refresh {
-            self.refresh_calendar_accounts();
         }
     }
 

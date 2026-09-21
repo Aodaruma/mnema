@@ -3,6 +3,7 @@ use super::*;
 pub(super) fn fixture() -> (tempfile::TempDir, MnemaGuiApp, egui::Context) {
     let directory = tempfile::tempdir().unwrap();
     let config = DesktopConfig {
+        background_enabled: false,
         vault_path: directory.path().join("vault").display().to_string(),
         storage_backend: DesktopStorageBackend::Sqlite,
         sqlite_path: directory.path().join("test.sqlite").display().to_string(),
