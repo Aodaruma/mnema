@@ -20,3 +20,6 @@ target/
 
 /target
 /dist
+
+# Private notes in the default development vault
+/vault/notes/

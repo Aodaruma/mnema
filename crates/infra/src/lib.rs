@@ -21,3 +21,4 @@ pub mod automation;
 pub mod calendar;
 pub mod db;
 pub mod llm;
+pub mod notes;
