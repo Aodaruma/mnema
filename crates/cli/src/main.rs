@@ -346,6 +346,7 @@ async fn run_task(vault: &Vault, args: TaskArgs, json: bool) -> Result<()> {
                 CaptureTaskService::new(tasks.as_ref(), lists.as_ref(), statuses.as_ref());
             let result = service
                 .capture_inbox_task(CaptureTaskRequest {
+                    status_id: None,
                     title,
                     description,
                     due_date: due.as_deref().map(parse_date).transpose()?,

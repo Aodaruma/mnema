@@ -1929,6 +1929,7 @@ impl MnemaGuiApp {
         };
 
         self.capture_task(CaptureTaskRequest {
+            status_id: None,
             title,
             description: None,
             due_date,
@@ -7093,6 +7094,7 @@ fn parse_quick_capture(value: &str, today: Date) -> Result<CaptureTaskRequest> {
     }
 
     Ok(CaptureTaskRequest {
+        status_id: None,
         title,
         description: None,
         due_date,

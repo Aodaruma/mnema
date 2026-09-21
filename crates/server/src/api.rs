@@ -329,6 +329,7 @@ async fn create_task(
         CaptureTaskService::new(task_repo.as_ref(), list_repo.as_ref(), status_repo.as_ref());
     let result = service
         .capture_inbox_task(CaptureTaskRequest {
+            status_id: None,
             title: input.title,
             description: normalize_description(input.description),
             due_date: parse_optional_date(input.due_date)?,

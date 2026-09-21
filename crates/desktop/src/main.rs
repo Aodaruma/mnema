@@ -118,6 +118,7 @@ async fn run_add(args: &[String]) -> anyhow::Result<()> {
         CaptureTaskService::new(task_repo.as_ref(), list_repo.as_ref(), status_repo.as_ref());
     let result = service
         .capture_inbox_task(CaptureTaskRequest {
+            status_id: None,
             title,
             description: None,
             due_date,

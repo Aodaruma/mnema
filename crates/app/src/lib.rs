@@ -32,6 +32,8 @@ pub enum AppError {
     Repository(String),
     #[error("task not found")]
     TaskNotFound,
+    #[error("list not found")]
+    ListNotFound,
     #[error("schedule block not found")]
     ScheduleBlockNotFound,
     #[error("schedule block end must be after start")]
@@ -40,6 +42,8 @@ pub enum AppError {
     MissingDefaultInbox,
     #[error("missing default task status")]
     MissingDefaultStatus,
+    #[error("the selected status is unavailable in this project")]
+    InvalidCaptureStatus,
     #[error("missing done task status")]
     MissingDoneStatus,
     #[error("task title is required")]
@@ -87,6 +91,8 @@ pub type AppResult<T> = Result<T, AppError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureTaskRequest {
     pub title: String,
+    #[serde(default)]
+    pub status_id: Option<StatusId>,
     pub description: Option<String>,
     pub due_date: Option<Date>,
     pub estimated_minutes: Option<u32>,
@@ -148,14 +154,54 @@ impl<'a> CaptureTaskService<'a> {
             .into_iter()
             .find(|list| list.kind == ListKind::Inbox)
             .ok_or(AppError::MissingDefaultInbox)?;
-        let status_id = default_task_status_id(self.statuses).await?;
+        self.capture_in_list(request, inbox).await
+    }
+
+    pub async fn capture_task_in_list(
+        &self,
+        request: CaptureTaskRequest,
+        list_id: ListId,
+    ) -> AppResult<CaptureTaskResult> {
+        let list = self
+            .lists
+            .find(list_id)
+            .await?
+            .ok_or(AppError::ListNotFound)?;
+        self.capture_in_list(request, list).await
+    }
+
+    async fn capture_in_list(
+        &self,
+        request: CaptureTaskRequest,
+        list: List,
+    ) -> AppResult<CaptureTaskResult> {
+        let title = request.title.trim();
+        if title.is_empty() {
+            return Err(AppError::EmptyTaskTitle);
+        }
+        let status_id = if let Some(id) = request.status_id {
+            let mut candidates = self.statuses.list_statuses_for_project(None).await?;
+            if list.project_id.is_some() {
+                candidates.extend(
+                    self.statuses
+                        .list_statuses_for_project(list.project_id.clone())
+                        .await?,
+                );
+            }
+            if !candidates.iter().any(|status| status.id == id) {
+                return Err(AppError::InvalidCaptureStatus);
+            }
+            id
+        } else {
+            default_task_status_id(self.statuses).await?
+        };
         let now = OffsetDateTime::now_utc();
         let task = Task {
             id: TaskId::new(),
             title: title.to_string(),
             description: request.description,
-            project_id: None,
-            list_id: Some(inbox.id),
+            project_id: list.project_id,
+            list_id: Some(list.id),
             status_id,
             due_date: request.due_date,
             start_date: None,
@@ -1032,6 +1078,7 @@ mod tests {
 
         let result = service
             .capture_inbox_task(CaptureTaskRequest {
+                status_id: None,
                 title: "  Write first task  ".into(),
                 description: None,
                 due_date: Some(date!(2026 - 06 - 25)),
@@ -1058,6 +1105,7 @@ mod tests {
 
         let err = service
             .capture_inbox_task(CaptureTaskRequest {
+                status_id: None,
                 title: "   ".into(),
                 description: None,
                 due_date: None,
@@ -1067,6 +1115,49 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, AppError::EmptyTaskTitle));
+    }
+
+    #[tokio::test]
+    async fn capture_validates_requested_status_before_inserting() {
+        let (mut statuses, _, done_status) = status_catalog();
+        let mut foreign = statuses.statuses[0].clone();
+        foreign.id = StatusId::new();
+        foreign.project_id = Some(ProjectId::new());
+        let foreign_id = foreign.id.clone();
+        statuses.statuses.push(foreign);
+        let tasks = CapturingTaskRepository {
+            tasks: Mutex::new(Vec::new()),
+        };
+        let lists = MemoryListRepository {
+            lists: vec![inbox_list()],
+        };
+        let service = CaptureTaskService::new(&tasks, &lists, &statuses);
+        for id in [StatusId::new(), foreign_id] {
+            let result = service
+                .capture_inbox_task(CaptureTaskRequest {
+                    title: "Invalid status".into(),
+                    status_id: Some(id),
+                    description: None,
+                    due_date: None,
+                    estimated_minutes: None,
+                })
+                .await;
+            assert!(matches!(result, Err(AppError::InvalidCaptureStatus)));
+            assert!(tasks.list_all().await.unwrap().is_empty());
+        }
+        let task = service
+            .capture_inbox_task(CaptureTaskRequest {
+                title: "Already done".into(),
+                status_id: Some(done_status.clone()),
+                description: None,
+                due_date: None,
+                estimated_minutes: None,
+            })
+            .await
+            .unwrap()
+            .task;
+        assert_eq!(task.status_id, done_status);
+        assert_eq!(tasks.list_all().await.unwrap(), vec![task]);
     }
 
     #[tokio::test]
