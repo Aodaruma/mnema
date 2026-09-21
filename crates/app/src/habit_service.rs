@@ -68,6 +68,30 @@ impl<'a> HabitService<'a> {
         self.habits.list_enabled(user_id).await.map_err(Into::into)
     }
 
+    pub async fn update(&self, original: &Habit, request: AddHabitRequest) -> AppResult<Habit> {
+        let mut habit = self
+            .habits
+            .find(original.id.clone())
+            .await?
+            .ok_or(AppError::HabitNotFound)?;
+        if habit.updated_at != original.updated_at || habit.user_id != request.user_id {
+            return Err(AppError::InvalidHabit(
+                "習慣が変更されています。開き直してください".into(),
+            ));
+        }
+        habit.title = request.title.trim().to_owned();
+        habit.schedule = request.schedule;
+        habit.duration_minutes = request.duration_minutes;
+        habit.preferred_window = request.preferred_window;
+        habit.flexibility = request.flexibility;
+        habit
+            .validate()
+            .map_err(|error| AppError::InvalidHabit(error.to_string()))?;
+        habit.updated_at = OffsetDateTime::now_utc();
+        self.habits.upsert(habit.clone()).await?;
+        Ok(habit)
+    }
+
     pub async fn skip(
         &self,
         occurrence_id: HabitOccurrenceId,

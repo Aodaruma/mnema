@@ -555,6 +555,45 @@ impl<'a> ScheduleBlockCommandService<'a> {
         Ok(block)
     }
 
+    /// Return an editable task/habit block to automatic placement, or protect its position.
+    pub async fn set_fixed(
+        &self,
+        block_id: ScheduleBlockId,
+        fixed: bool,
+    ) -> AppResult<ScheduleBlock> {
+        let mut block = self
+            .schedule_blocks
+            .find(block_id)
+            .await?
+            .ok_or(AppError::ScheduleBlockNotFound)?;
+        if !matches!(
+            block.block_type,
+            ScheduleBlockType::Task | ScheduleBlockType::Habit
+        ) || matches!(
+            block.state,
+            ScheduleBlockState::Done
+                | ScheduleBlockState::Cancelled
+                | ScheduleBlockState::Active
+                | ScheduleBlockState::Missed
+        ) {
+            return Err(AppError::InvalidScheduleBlockWindow);
+        }
+        block.locked = fixed;
+        block.source = if fixed {
+            ScheduleBlockSource::Manual
+        } else {
+            ScheduleBlockSource::Scheduler
+        };
+        block.state = if fixed {
+            ScheduleBlockState::Scheduled
+        } else {
+            ScheduleBlockState::Proposed
+        };
+        block.updated_at = OffsetDateTime::now_utc();
+        self.schedule_blocks.update(block.clone()).await?;
+        Ok(block)
+    }
+
     pub async fn update_window(
         &self,
         request: UpdateScheduleBlockWindowRequest,
