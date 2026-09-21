@@ -37,6 +37,26 @@ impl Default for HabitDraft {
 }
 
 impl HabitDraft {
+    pub fn from_habit(habit: &Habit) -> Self {
+        let mut draft = Self {
+            title: habit.title.clone(),
+            duration_minutes: habit.duration_minutes.to_string(),
+            flexibility: habit.flexibility,
+            has_preferred_window: habit.preferred_window.is_some(),
+            ..Self::default()
+        };
+        if let HabitSchedule::Weekdays { weekdays } = &habit.schedule {
+            draft.schedule = HabitScheduleChoice::Weekdays;
+            draft.weekdays = DAYS.map(|day| weekdays.contains(&day));
+        }
+        if let Some(window) = &habit.preferred_window {
+            draft.preferred_start =
+                format!("{:02}:{:02}", window.start.hour(), window.start.minute());
+            draft.preferred_end = format!("{:02}:{:02}", window.end.hour(), window.end.minute());
+        }
+        draft
+    }
+
     pub fn request(&self, user_id: UserId) -> Result<AddHabitRequest> {
         let title = self.title.trim();
         if title.is_empty() {
@@ -224,8 +244,6 @@ pub fn normalize_selected_calendar_ids(
     }
     normalized
 }
-
-pub const DAY_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const DAYS: [DayOfWeek; 7] = [
     DayOfWeek::Monday,

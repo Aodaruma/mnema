@@ -15,10 +15,8 @@ use eframe::egui::{
 };
 use mnema_app::{
     AutoSchedulePreview, AutoScheduleRequest, AutoScheduleService, CaptureTaskRequest,
-    CaptureTaskService, HabitService, PlanTodayResult, ProposedScheduleBlock,
-    RepairScheduleRequest, RepairScheduleService, ScheduleBlockCommandService, ScheduleIssue,
+    CaptureTaskService, HabitService, PlanTodayResult, ScheduleBlockCommandService, ScheduleIssue,
     SchedulePlanStoreService, TaskCommandService, UpdateScheduleBlockWindowRequest,
-    UpdateTaskRequest,
 };
 use mnema_core::prelude::*;
 use mnema_infra::{
@@ -32,16 +30,31 @@ use time_tz::{OffsetDateTimeExt, timezones};
 use tokio::runtime::Runtime;
 
 use crate::scheduling_ui::{
-    DAY_LABELS, HabitDraft, HabitScheduleChoice, SchedulingForm, date_range_end, item_issue_label,
+    HabitDraft, HabitScheduleChoice, SchedulingForm, date_range_end, item_issue_label,
     normalize_selected_calendar_ids,
 };
+
+mod calendar;
+mod components;
+mod date_picker;
+mod habits;
+mod home;
+mod task_fields;
+mod timezone;
+use components::theme_toggle;
+use timezone::TimezoneMode;
+#[cfg(test)]
+mod interaction_tests;
+mod pages;
+mod task_capture;
+mod tasks;
 
 static MENU_EVENTS: OnceLock<Mutex<Vec<MenuEvent>>> = OnceLock::new();
 
 pub fn run_gui(initial_vault_path: PathBuf) -> Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 760.0])
+            .with_inner_size([1360.0, 920.0])
             .with_min_inner_size([860.0, 600.0]),
         ..Default::default()
     };
@@ -60,7 +73,6 @@ enum View {
     Inbox,
     Projects,
     Schedule,
-    Calendar,
     Habits,
     Assistant,
     Activity,
@@ -70,6 +82,8 @@ enum View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScheduleViewMode {
     Day,
+    Days(u8),
+    Week,
     Calendar,
 }
 
@@ -87,22 +101,6 @@ enum TaskListDensity {
     Compact,
 }
 
-impl TaskListDensity {
-    fn row_height(self) -> f32 {
-        match self {
-            Self::Normal => 64.0,
-            Self::Compact => 48.0,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "Normal",
-            Self::Compact => "Compact",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum TaskSortMode {
@@ -116,10 +114,10 @@ enum TaskSortMode {
 impl TaskSortMode {
     fn label(self) -> &'static str {
         match self {
-            Self::DueDate => "Due date",
-            Self::Estimate => "Estimate",
-            Self::Importance => "Importance",
-            Self::Created => "Created",
+            Self::DueDate => "期限順",
+            Self::Estimate => "見積もり時間順",
+            Self::Importance => "重要度順",
+            Self::Created => "作成順",
         }
     }
 }
@@ -127,26 +125,8 @@ impl TaskSortMode {
 #[derive(Debug, Clone)]
 enum TaskAction {
     SetStatus(TaskId, StatusId),
-    SaveInlineField(TaskId, TaskInlineField, String),
     RequestDelete(TaskId),
     ConfirmDelete(TaskId),
-    CancelDelete,
-    CancelInlineEdit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TaskInlineField {
-    Title,
-    DueDate,
-    EstimateMinutes,
-}
-
-#[derive(Debug, Clone)]
-struct TaskInlineEdit {
-    task_id: TaskId,
-    field: TaskInlineField,
-    value: String,
-    focus: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,12 +167,6 @@ struct HomeAgendaOutput {
     move_schedule: Option<MoveScheduleBlockRequest>,
 }
 
-#[derive(Debug, Default)]
-struct ScheduleDayOutput {
-    action: Option<ScheduleAction>,
-    move_schedule: Option<MoveScheduleBlockRequest>,
-}
-
 #[derive(Debug, Clone)]
 struct StatusHistoryEntry {
     task_id: TaskId,
@@ -201,15 +175,8 @@ struct StatusHistoryEntry {
     after_status_id: StatusId,
 }
 
-#[derive(Debug, Clone)]
-enum ScheduleAction {
-    Edit(ScheduleBlockId),
-    SetState(ScheduleBlockId, ScheduleBlockState),
-}
-
 #[derive(Debug, Clone, Copy)]
 enum MenuAction {
-    Refresh,
     Close,
     Undo,
     Redo,
@@ -224,7 +191,6 @@ struct AssistantChatMessage {
 }
 
 const INPUT_HEIGHT: f32 = 34.0;
-const THEME_SWITCH_SIZE: egui::Vec2 = egui::vec2(76.0, 34.0);
 const FONT_WEIGHT_REGULAR: f32 = 400.0;
 const FONT_WEIGHT_BOLD: f32 = 700.0;
 const TEXT_REGULAR_FONT_FAMILY: &str = "mnema_text_regular";
@@ -235,21 +201,15 @@ const DEFAULT_POSTGRES_URL: &str = "postgres://postgres:postgres@localhost/mnema
 const DEFAULT_TIMEZONE_OFFSET: &str = "Asia/Tokyo";
 
 const ICON_ASSISTANT: char = '\u{e39f}';
-const ICON_AUTORENEW: char = '\u{e863}';
 const ICON_CHECK: char = '\u{e5ca}';
-const ICON_CLOSE: char = '\u{e5cd}';
 const ICON_DARK_MODE: char = '\u{e51c}';
-const ICON_DELETE: char = '\u{e872}';
 const ICON_EVENT: char = '\u{e878}';
-const ICON_EXPAND_MORE: char = '\u{e5cf}';
-const ICON_CHEVRON_RIGHT: char = '\u{e5cc}';
 const ICON_FOLDER: char = '\u{e2c7}';
 const ICON_HISTORY: char = '\u{e889}';
 const ICON_HOME: char = '\u{e88a}';
 const ICON_HABIT: char = '\u{e87d}';
 const ICON_INBOX: char = '\u{e156}';
 const ICON_LIGHT_MODE: char = '\u{e518}';
-const ICON_REFRESH: char = '\u{e5d5}';
 const ICON_SETTINGS: char = '\u{e8b8}';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,13 +224,6 @@ impl DesktopStorageBackend {
         match backend {
             StorageBackend::Sqlite => Self::Sqlite,
             StorageBackend::Postgres => Self::Postgres,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Sqlite => "SQLite",
-            Self::Postgres => "PostgreSQL",
         }
     }
 }
@@ -292,6 +245,10 @@ struct DesktopConfig {
     dark_mode: bool,
     #[serde(default = "default_timezone_offset")]
     timezone_offset: String,
+    #[serde(default)]
+    timezone_mode: TimezoneMode,
+    #[serde(default)]
+    manual_timezone: String,
     #[serde(default = "default_availability_start")]
     availability_start: String,
     #[serde(default = "default_availability_end")]
@@ -300,11 +257,15 @@ struct DesktopConfig {
     home_task_density: TaskListDensity,
     #[serde(default)]
     home_task_sort: TaskSortMode,
+    #[serde(default)]
+    task_grouping: tasks::TaskGrouping,
     llm_provider: DesktopLlmProvider,
     ollama_url: String,
     openai_url: String,
     planning_model: String,
     routine_model: String,
+    #[serde(default)]
+    read_notifications: Vec<AutomationLogId>,
 }
 
 impl DesktopConfig {
@@ -316,15 +277,19 @@ impl DesktopConfig {
             database_url: DEFAULT_POSTGRES_URL.to_string(),
             dark_mode: default_dark_mode,
             timezone_offset: default_timezone_offset(),
+            timezone_mode: TimezoneMode::Automatic,
+            manual_timezone: default_timezone_offset(),
             availability_start: default_availability_start(),
             availability_end: default_availability_end(),
             home_task_density: TaskListDensity::Normal,
             home_task_sort: TaskSortMode::DueDate,
+            task_grouping: tasks::TaskGrouping::Schedule,
             llm_provider: DesktopLlmProvider::Disabled,
             ollama_url: "http://localhost:11434".to_string(),
             openai_url: "https://api.openai.com".to_string(),
             planning_model: "gpt-4.1".to_string(),
             routine_model: "gpt-4.1-mini".to_string(),
+            read_notifications: Vec::new(),
         };
 
         let Ok(bytes) = fs::read(config_path()) else {
@@ -391,7 +356,6 @@ fn parse_timezone_offset(value: &str) -> Result<UtcOffset> {
 
 struct NativeMenu {
     root: Menu,
-    refresh: MenuItem,
     close: MenuItem,
     undo: PredefinedMenuItem,
     redo: PredefinedMenuItem,
@@ -418,10 +382,8 @@ impl NativeMenu {
     }
 
     fn new(dark_mode: bool) -> Result<Self> {
-        let refresh = MenuItem::with_id("mnema.file.refresh", "&Refresh", true, None);
         let close = MenuItem::with_id("mnema.file.close", "&Close", true, None);
-        let file_separator = PredefinedMenuItem::separator();
-        let file_menu = Submenu::with_items("&File", true, &[&refresh, &file_separator, &close])?;
+        let file_menu = Submenu::with_items("&File", true, &[&close])?;
 
         let undo = PredefinedMenuItem::undo(Some("&Undo"));
         let redo = PredefinedMenuItem::redo(Some("&Redo"));
@@ -481,7 +443,6 @@ impl NativeMenu {
 
         Ok(Self {
             root,
-            refresh,
             close,
             undo,
             redo,
@@ -538,9 +499,7 @@ impl NativeMenu {
 
     fn action_for(&self, event: &MenuEvent) -> Option<MenuAction> {
         let id = event.id().as_ref();
-        if id == self.refresh.id().as_ref() {
-            Some(MenuAction::Refresh)
-        } else if id == self.close.id().as_ref() {
+        if id == self.close.id().as_ref() {
             Some(MenuAction::Close)
         } else if id == self.undo.id().as_ref() {
             Some(MenuAction::Undo)
@@ -628,6 +587,11 @@ struct MnemaGuiApp {
     planning_model: String,
     routine_model: String,
     timezone_offset: String,
+    timezone_mode: TimezoneMode,
+    applied_timezone_mode: TimezoneMode,
+    manual_timezone: String,
+    detected_timezone: Option<String>,
+    timezone_error: Option<String>,
     availability_start: String,
     availability_end: String,
     sleep_start: String,
@@ -635,24 +599,19 @@ struct MnemaGuiApp {
     travel_buffer_minutes: String,
     view: View,
     last_view: View,
-    task_title: String,
     quick_capture: String,
     assistant_input: String,
     assistant_messages: Vec<AssistantChatMessage>,
-    due_date: String,
-    minutes: String,
-    inline_task_edit: Option<TaskInlineEdit>,
     editing_schedule_block_id: Option<ScheduleBlockId>,
     schedule_edit_start: String,
     schedule_edit_end: String,
     target_date: String,
     scroll_home_agenda_to_now: bool,
-    repair_from_time: String,
-    schedule_view_mode: ScheduleViewMode,
+    home_filter: home::TaskFilter,
+    home_calendar_mode: ScheduleViewMode,
+    workspace_ui: pages::WorkspaceUi,
     tasks: Vec<Task>,
     done_tasks: Vec<Task>,
-    show_done_tasks: bool,
-    done_task_limit: usize,
     lists: Vec<List>,
     statuses: Vec<Status>,
     status_groups: Vec<StatusGroup>,
@@ -671,7 +630,6 @@ struct MnemaGuiApp {
     plan: Option<PlanTodayResult>,
     auto_preview: Option<AutoSchedulePreview>,
     planning_days: u32,
-    plan_source: ScheduleBlockSource,
     schedule: Vec<ScheduleBlock>,
     schedule_month: Vec<ScheduleBlock>,
     automation_logs: Vec<AutomationLog>,
@@ -708,12 +666,28 @@ impl MnemaGuiApp {
                 None
             }
         };
+        Self::from_config(config, native_menu)
+    }
+
+    fn from_config(mut config: DesktopConfig, native_menu: Option<NativeMenu>) -> Self {
+        if config.manual_timezone.is_empty() {
+            config.manual_timezone = config.timezone_offset.clone();
+        }
+        let detected =
+            mnema_infra::system_timezone::detect().and_then(timezone::validate_system_timezone);
+        if config.timezone_mode == TimezoneMode::Automatic
+            && let Ok(name) = &detected
+        {
+            config.timezone_offset.clone_from(name);
+        }
+        let timezone_error = detected.as_ref().err().map(ToString::to_string);
+        let detected_timezone = detected.ok();
+        let dark_mode = config.dark_mode;
         let native_menu_synced_dark_mode = native_menu.as_ref().map(|_| dark_mode);
 
         let timezone = parse_timezone_offset(&config.timezone_offset).unwrap_or(default_timezone());
         let now = OffsetDateTime::now_utc().to_offset(timezone);
         let today = now.date().to_string();
-        let current_time = format_hm(now);
         let runtime = Runtime::new().expect("tokio runtime must initialize for Mnema GUI");
         let mut app = Self {
             runtime,
@@ -729,6 +703,11 @@ impl MnemaGuiApp {
             planning_model: config.planning_model,
             routine_model: config.routine_model,
             timezone_offset: config.timezone_offset,
+            timezone_mode: config.timezone_mode,
+            applied_timezone_mode: config.timezone_mode,
+            manual_timezone: config.manual_timezone,
+            detected_timezone,
+            timezone_error,
             availability_start: config.availability_start,
             availability_end: config.availability_end,
             sleep_start: "23:00".into(),
@@ -736,29 +715,28 @@ impl MnemaGuiApp {
             travel_buffer_minutes: "15".into(),
             view: View::Home,
             last_view: View::Settings,
-            task_title: String::new(),
             quick_capture: String::new(),
             assistant_input: String::new(),
             assistant_messages: vec![AssistantChatMessage {
                 role: "Assistant",
                 content:
-                    "タスク作成や今日の次アクションを相談できます。例: Write proposal tomorrow 45m"
+                    "タスクを追加したり、次に取り組むことを確認できます。例: 企画書を作る /due tomorrow /minutes 45"
                         .into(),
             }],
-            due_date: today.clone(),
-            minutes: String::from("45"),
-            inline_task_edit: None,
             editing_schedule_block_id: None,
             schedule_edit_start: String::new(),
             schedule_edit_end: String::new(),
             target_date: today.clone(),
             scroll_home_agenda_to_now: true,
-            repair_from_time: current_time,
-            schedule_view_mode: ScheduleViewMode::Day,
+            home_filter: home::TaskFilter::All,
+            home_calendar_mode: ScheduleViewMode::Day,
+            workspace_ui: pages::WorkspaceUi {
+                read_notifications: config.read_notifications.into_iter().collect(),
+                task_grouping: config.task_grouping,
+                ..Default::default()
+            },
             tasks: Vec::new(),
             done_tasks: Vec::new(),
-            show_done_tasks: false,
-            done_task_limit: 10,
             lists: Vec::new(),
             statuses: Vec::new(),
             status_groups: Vec::new(),
@@ -777,7 +755,6 @@ impl MnemaGuiApp {
             plan: None,
             auto_preview: None,
             planning_days: 1,
-            plan_source: ScheduleBlockSource::Scheduler,
             schedule: Vec::new(),
             schedule_month: Vec::new(),
             automation_logs: Vec::new(),
@@ -831,6 +808,10 @@ impl MnemaGuiApp {
                 self.error = None;
                 self.undo_stack.clear();
                 self.redo_stack.clear();
+                self.calendar_selection_edits.clear();
+                self.workspace_ui.task_editor = None;
+                self.workspace_ui.detail_task_id = None;
+                self.workspace_ui.capture_list = None;
                 self.refresh_tasks();
                 self.refresh_projects();
                 self.refresh_task_context();
@@ -838,6 +819,9 @@ impl MnemaGuiApp {
                 self.refresh_schedule_month();
                 self.refresh_automation_logs();
                 self.refresh_scheduling_preferences();
+                if self.applied_timezone_mode == TimezoneMode::Automatic {
+                    self.refresh_system_timezone(true);
+                }
                 self.refresh_habits();
                 self.refresh_calendar_accounts();
             }
@@ -875,9 +859,6 @@ impl MnemaGuiApp {
                 self.tasks = tasks;
                 self.done_tasks = done_tasks;
                 self.auto_preview = None;
-                self.done_task_limit = self
-                    .done_task_limit
-                    .clamp(10, self.done_tasks.len().max(10));
                 self.error = None;
             }
             Err(error) => self.set_error(error),
@@ -926,8 +907,15 @@ impl MnemaGuiApp {
             let list_repo = vault.list_repo();
             let status_repo = vault.status_repo();
             let mut lists = list_repo.list_system().await?;
+            let mut milestones = Vec::new();
             for project_id in &project_ids {
                 lists.extend(list_repo.list_by_project(project_id.clone()).await?);
+                milestones.extend(
+                    vault
+                        .milestone_repo()
+                        .list_by_project(project_id.clone())
+                        .await?,
+                );
             }
             lists.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -948,18 +936,20 @@ impl MnemaGuiApp {
                     .then_with(|| left.name.cmp(&right.name))
             });
 
-            Result::<(Vec<List>, Vec<Status>, Vec<StatusGroup>)>::Ok((
+            Result::<(Vec<List>, Vec<Status>, Vec<StatusGroup>, Vec<Milestone>)>::Ok((
                 lists,
                 statuses,
                 status_groups,
+                milestones,
             ))
         });
 
         match result {
-            Ok((lists, statuses, status_groups)) => {
+            Ok((lists, statuses, status_groups, milestones)) => {
                 self.lists = lists;
                 self.statuses = statuses;
                 self.status_groups = status_groups;
+                self.workspace_ui.task_milestones = milestones;
                 self.error = None;
             }
             Err(error) => self.set_error(error),
@@ -1094,7 +1084,6 @@ impl MnemaGuiApp {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
-        let deleted_task_id = task_id.clone();
         let result = self.runtime.block_on(async move {
             let task_repo = vault.task_repo();
             let status_repo = vault.status_repo();
@@ -1107,13 +1096,6 @@ impl MnemaGuiApp {
             Ok(()) => {
                 self.message = String::from("Task deleted");
                 self.error = None;
-                if self
-                    .inline_task_edit
-                    .as_ref()
-                    .is_some_and(|edit| edit.task_id == deleted_task_id)
-                {
-                    self.inline_task_edit = None;
-                }
                 self.refresh_tasks();
                 self.refresh_schedule();
             }
@@ -1126,89 +1108,11 @@ impl MnemaGuiApp {
             TaskAction::SetStatus(task_id, status_id) => {
                 self.update_task_status(task_id, status_id)
             }
-            TaskAction::SaveInlineField(task_id, field, value) => {
-                self.save_inline_task_field(task_id, field, value)
-            }
             TaskAction::RequestDelete(task_id) => self.confirming_delete_task_id = Some(task_id),
             TaskAction::ConfirmDelete(task_id) => {
                 self.confirming_delete_task_id = None;
                 self.delete_task(task_id);
             }
-            TaskAction::CancelDelete => self.confirming_delete_task_id = None,
-            TaskAction::CancelInlineEdit => self.inline_task_edit = None,
-        }
-    }
-
-    fn save_inline_task_field(&mut self, task_id: TaskId, field: TaskInlineField, value: String) {
-        let Some(task) = self.tasks.iter().find(|task| task.id == task_id).cloned() else {
-            self.inline_task_edit = None;
-            self.set_error(anyhow!("task not found"));
-            return;
-        };
-
-        let mut title = task.title.clone();
-        let mut due_date = task.due_date;
-        let mut estimated_minutes = task.estimated_minutes;
-
-        match field {
-            TaskInlineField::Title => {
-                title = value.trim().to_string();
-                if title.is_empty() {
-                    self.set_error(anyhow!("タスク名を入力してください"));
-                    return;
-                }
-            }
-            TaskInlineField::DueDate => {
-                due_date =
-                    match parse_optional_date_with_today(&value, self.now_in_timezone().date()) {
-                        Ok(date) => date,
-                        Err(error) => {
-                            self.set_error(error);
-                            return;
-                        }
-                    };
-            }
-            TaskInlineField::EstimateMinutes => {
-                estimated_minutes = match parse_optional_u32(&value) {
-                    Ok(minutes) => minutes,
-                    Err(error) => {
-                        self.set_error(error);
-                        return;
-                    }
-                };
-            }
-        }
-
-        let Ok(vault) = self.vault_clone() else {
-            return;
-        };
-
-        let result = self.runtime.block_on(async move {
-            let task_repo = vault.task_repo();
-            let status_repo = vault.status_repo();
-            let service = TaskCommandService::new(task_repo.as_ref(), status_repo.as_ref());
-            Result::<Task>::Ok(
-                service
-                    .update_task(UpdateTaskRequest {
-                        task_id,
-                        title,
-                        due_date,
-                        estimated_minutes,
-                    })
-                    .await?,
-            )
-        });
-
-        match result {
-            Ok(task) => {
-                self.inline_task_edit = None;
-                self.message = format!("Updated: {}", task.title);
-                self.error = None;
-                self.refresh_tasks();
-                self.refresh_schedule();
-                self.refresh_schedule_month();
-            }
-            Err(error) => self.set_error(error),
         }
     }
 
@@ -1439,52 +1343,38 @@ impl MnemaGuiApp {
     }
 
     fn refresh_schedule_month(&mut self) {
-        let Ok(vault) = self.vault_clone() else {
-            return;
-        };
-        let target_date = match parse_required_date(&self.target_date) {
-            Ok(date) => date,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let days = match dates_in_month(target_date) {
-            Ok(days) => days,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let Some(month_start) = days.first().copied() else {
-            self.schedule_month.clear();
-            return;
-        };
-        let Some(month_end) = days.last().and_then(|day| day.next_day()) else {
-            self.set_error(anyhow!("月表示の日付範囲を作成できません"));
-            return;
-        };
-        let planning_window =
-            match mnema_app::iana_date_range(month_start, month_end, self.timezone_offset.trim()) {
-                Ok(window) => window,
-                Err(error) => {
-                    self.set_error(anyhow!(error.to_string()));
-                    return;
-                }
-            };
-
-        let result = self.runtime.block_on(async move {
-            let schedule_block_repo = vault.schedule_block_repo();
-            let mut blocks = schedule_block_repo
-                .list_overlapping(planning_window.start, planning_window.end)
-                .await?;
-            blocks.sort_by_key(|block| (block.start_at, block.end_at));
-            Result::<Vec<ScheduleBlock>>::Ok(blocks)
-        });
-
+        let result = (|| -> Result<_> {
+            let vault = self.vault_clone()?;
+            let date = parse_required_date(&self.target_date)?;
+            let start = calendar_grid_start(first_day_of_month(date)?);
+            let end = add_days(start, 49).ok_or_else(|| anyhow!("日付範囲を作成できません"))?;
+            let window = mnema_app::iana_date_range(start, end, self.timezone_offset.trim())?;
+            let today = self.now_in_timezone().date();
+            let today_start = mnema_app::iana_date_range(
+                today,
+                today.next_day().unwrap(),
+                self.timezone_offset.trim(),
+            )?
+            .start;
+            self.runtime.block_on(async move {
+                let repo = vault.schedule_block_repo();
+                let mut blocks = repo.list_overlapping(window.start, window.end).await?;
+                blocks.sort_by_key(|block| (block.start_at, block.end_at));
+                let future = repo
+                    .list_overlapping(today_start, Date::MAX.midnight().assume_utc())
+                    .await?;
+                let external = vault
+                    .external_event_repo()
+                    .list_overlapping(window.start, window.end)
+                    .await?;
+                Result::<_>::Ok((blocks, future, external))
+            })
+        })();
         match result {
-            Ok(blocks) => {
+            Ok((blocks, future, external)) => {
                 self.schedule_month = blocks;
+                self.workspace_ui.calendar.future_blocks = future;
+                self.workspace_ui.calendar.external_events = external;
                 self.error = None;
             }
             Err(error) => self.set_error(error),
@@ -1537,7 +1427,10 @@ impl MnemaGuiApp {
                     self.availability_end.clone(),
                 );
                 form.apply_preferences(&preferences);
-                self.timezone_offset = form.timezone;
+                if self.timezone_mode == TimezoneMode::Manual {
+                    self.timezone_offset = form.timezone;
+                    self.manual_timezone.clone_from(&self.timezone_offset);
+                }
                 self.availability_start = form.work_start;
                 self.availability_end = form.work_end;
                 self.sleep_start = form.sleep_start;
@@ -1730,16 +1623,33 @@ impl MnemaGuiApp {
         });
         match result {
             Ok((accounts, cursors)) => {
-                self.calendar_selection_edits = accounts
-                    .iter()
-                    .map(|account| {
+                self.calendar_selection_edits
+                    .retain(|id, _| accounts.iter().any(|account| &account.id == id));
+                for account in &accounts {
+                    let previous = self
+                        .calendar_accounts
+                        .iter()
+                        .find(|old| old.id == account.id)
+                        .map(|old| {
+                            normalize_selected_calendar_ids(
+                                &old.selected_calendar_ids.join(","),
+                                old.managed_calendar_id.as_deref(),
+                            )
+                            .join(", ")
+                        });
+                    let edited = self
+                        .calendar_selection_edits
+                        .get(&account.id)
+                        .is_some_and(|draft| previous.as_ref().is_some_and(|old| draft != old));
+                    if !edited {
                         let selected = normalize_selected_calendar_ids(
                             &account.selected_calendar_ids.join(","),
                             account.managed_calendar_id.as_deref(),
                         );
-                        (account.id.clone(), selected.join(", "))
-                    })
-                    .collect();
+                        self.calendar_selection_edits
+                            .insert(account.id.clone(), selected.join(", "));
+                    }
+                }
                 self.calendar_accounts = accounts;
                 self.calendar_sync_cursors = cursors;
                 self.error = None;
@@ -1779,6 +1689,7 @@ impl MnemaGuiApp {
                 self.message = format!("Busy calendarを{saved_count}件保存しました");
                 self.error = None;
                 self.auto_preview = None;
+                self.calendar_selection_edits.remove(&account_id);
                 self.refresh_calendar_accounts();
             }
             Err(error) => self.set_error(error),
@@ -1822,6 +1733,10 @@ impl MnemaGuiApp {
             return;
         };
         let timezone = self.app_timezone();
+        self.workspace_ui.calendar.edit_start_date =
+            block.start_at.to_offset(timezone).date().to_string();
+        self.workspace_ui.calendar.edit_end_date =
+            block.end_at.to_offset(timezone).date().to_string();
         self.editing_schedule_block_id = Some(block.id.clone());
         self.schedule_edit_start = format_hm_in(block.start_at, timezone);
         self.schedule_edit_end = format_hm_in(block.end_at, timezone);
@@ -1832,23 +1747,25 @@ impl MnemaGuiApp {
         let Some(block_id) = self.editing_schedule_block_id.clone() else {
             return;
         };
-        let target_date = match parse_required_date(&self.target_date) {
-            Ok(date) => date,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let timezone = self.app_timezone();
-        let start_at = match parse_hm_for_date(&self.schedule_edit_start, target_date, timezone) {
-            Ok(value) => value,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let end_at = match parse_hm_for_date(&self.schedule_edit_end, target_date, timezone) {
-            Ok(value) => value,
+        let parsed = (|| -> Result<_> {
+            let start_date = parse_required_date(&self.workspace_ui.calendar.edit_start_date)?;
+            let end_date = parse_required_date(&self.workspace_ui.calendar.edit_end_date)?;
+            let start = calendar::parse_event_time(
+                start_date,
+                &self.schedule_edit_start,
+                &self.timezone_offset,
+                true,
+            )?;
+            let end = calendar::parse_event_time(
+                end_date,
+                &self.schedule_edit_end,
+                &self.timezone_offset,
+                false,
+            )?;
+            Ok((start, end))
+        })();
+        let (start_at, end_at) = match parsed {
+            Ok(window) => window,
             Err(error) => {
                 self.set_error(error);
                 return;
@@ -1896,63 +1813,16 @@ impl MnemaGuiApp {
         self.schedule_edit_end.clear();
     }
 
-    fn handle_schedule_action(&mut self, action: ScheduleAction) {
-        match action {
-            ScheduleAction::Edit(block_id) => self.start_edit_schedule_block(block_id),
-            ScheduleAction::SetState(block_id, state) => {
-                self.update_schedule_block_state(block_id, state)
-            }
-        }
-    }
-
-    fn add_task(&mut self) {
-        let title = self.task_title.trim().to_string();
-        if title.is_empty() {
-            self.set_error(anyhow!("タスク名を入力してください"));
-            return;
-        }
-
-        let due_date =
-            match parse_optional_date_with_today(&self.due_date, self.now_in_timezone().date()) {
-                Ok(date) => date,
-                Err(error) => {
-                    self.set_error(error);
-                    return;
-                }
-            };
-        let estimated_minutes = match parse_optional_u32(&self.minutes) {
-            Ok(minutes) => minutes,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-
-        self.capture_task(CaptureTaskRequest {
-            status_id: None,
-            title,
-            description: None,
-            due_date,
-            estimated_minutes,
-        });
-    }
-
-    fn capture_quick_task(&mut self) {
-        let today = OffsetDateTime::now_utc().date();
-        let request = match parse_quick_capture(&self.quick_capture, today) {
-            Ok(request) => request,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        self.capture_task(request);
-        if self.error.is_none() {
-            self.quick_capture.clear();
-        }
-    }
-
     fn capture_task(&mut self, request: CaptureTaskRequest) {
+        self.capture_task_in_location(request, None, None);
+    }
+
+    fn capture_task_in_location(
+        &mut self,
+        request: CaptureTaskRequest,
+        project_id: Option<ProjectId>,
+        list_id: Option<ListId>,
+    ) {
         let Ok(vault) = self.vault_clone() else {
             return;
         };
@@ -1967,7 +1837,35 @@ impl MnemaGuiApp {
                 list_repo.as_ref(),
                 status_repo.as_ref(),
             );
-            let task = service.capture_inbox_task(request).await?.task;
+            let task = if project_id.is_some() || list_id.is_some() {
+                let list = if let Some(id) = list_id {
+                    list_repo
+                        .find(id)
+                        .await?
+                        .ok_or_else(|| anyhow!("リストが見つかりません"))?
+                } else {
+                    let id = project_id.clone().expect("project or list is set");
+                    let lists = list_repo.list_by_project(id.clone()).await?;
+                    if let Some(list) = lists.first() {
+                        list.clone()
+                    } else {
+                        let list = List {
+                            id: ListId::new(),
+                            project_id: Some(id),
+                            name: "タスク".into(),
+                            is_system: false,
+                            kind: ListKind::Project,
+                            view_type: ListViewType::List,
+                            order: 0,
+                        };
+                        list_repo.insert(list.clone()).await?;
+                        list
+                    }
+                };
+                service.capture_task_in_list(request, list.id).await?.task
+            } else {
+                service.capture_inbox_task(request).await?.task
+            };
             let automation_log_repo = vault.automation_log_repo();
             automation_log_repo
                 .insert(AutomationLog {
@@ -1988,11 +1886,12 @@ impl MnemaGuiApp {
 
         match result {
             Ok(task) => {
-                self.task_title.clear();
                 self.message = format!("Added: {}", task.title);
                 self.error = None;
                 self.refresh_tasks();
                 self.refresh_automation_logs();
+                self.refresh_task_context();
+                self.refresh_project_children();
             }
             Err(error) => self.set_error(error),
         }
@@ -2248,81 +2147,6 @@ impl MnemaGuiApp {
         }
     }
 
-    fn repair_schedule(&mut self, save: bool) {
-        let Ok(vault) = self.vault_clone() else {
-            return;
-        };
-        let timezone = self.app_timezone();
-        let target_date = match parse_required_date(&self.target_date) {
-            Ok(date) => date,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let repair_from = match parse_hm_for_date(&self.repair_from_time, target_date, timezone) {
-            Ok(value) => value,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-        let availability = match self.workday_availability(target_date, timezone) {
-            Ok(availability) => availability,
-            Err(error) => {
-                self.set_error(error);
-                return;
-            }
-        };
-
-        let result = self.runtime.block_on(async move {
-            let task_repo = vault.task_repo();
-            let status_repo = vault.status_repo();
-            let schedule_block_repo = vault.schedule_block_repo();
-            let service = RepairScheduleService::new(
-                task_repo.as_ref(),
-                status_repo.as_ref(),
-                schedule_block_repo.as_ref(),
-            );
-            let repair = service
-                .repair_day(RepairScheduleRequest {
-                    target_date,
-                    repair_from,
-                    availability,
-                })
-                .await?;
-
-            let saved = if save {
-                let store = SchedulePlanStoreService::new(schedule_block_repo.as_ref());
-                store.save_repaired_plan(&repair.plan).await?.len()
-            } else {
-                0
-            };
-
-            Result::<(mnema_app::RepairScheduleResult, usize)>::Ok((repair, saved))
-        });
-
-        match result {
-            Ok((repair, saved)) => {
-                let block_count = repair.plan.output.blocks.len();
-                let fixed_count = repair.fixed_blocks.len();
-                self.plan = Some(repair.plan);
-                self.plan_source = ScheduleBlockSource::Repair;
-                self.message = if save {
-                    format!("Saved repaired plan: {saved} proposed blocks, {fixed_count} fixed")
-                } else {
-                    format!("Repaired {block_count} blocks, kept {fixed_count} fixed")
-                };
-                self.error = None;
-                if save {
-                    self.refresh_schedule();
-                    self.refresh_schedule_month();
-                }
-            }
-            Err(error) => self.set_error(error),
-        }
-    }
-
     fn create_manual_schedule_block(&mut self, request: ManualScheduleRequest) {
         let Ok(vault) = self.vault_clone() else {
             return;
@@ -2438,19 +2262,6 @@ impl MnemaGuiApp {
         OffsetDateTime::now_utc().to_offset(self.app_timezone())
     }
 
-    fn workday_availability(
-        &self,
-        date: Date,
-        timezone: UtcOffset,
-    ) -> Result<Vec<mnema_app::AvailabilityWindow>> {
-        workday_availability(
-            date,
-            timezone,
-            &self.availability_start,
-            &self.availability_end,
-        )
-    }
-
     fn selected_project_title(&self) -> Option<String> {
         let selected_id = self.selected_project_id.as_ref()?;
         self.projects
@@ -2460,6 +2271,15 @@ impl MnemaGuiApp {
     }
 
     fn save_settings(&mut self) {
+        if self.timezone_mode == TimezoneMode::Automatic {
+            self.refresh_system_timezone(false);
+            if let Some(error) = &self.timezone_error {
+                self.set_error(anyhow!(error.clone()));
+                return;
+            }
+        } else {
+            self.manual_timezone.clone_from(&self.timezone_offset);
+        }
         if let Err(error) = parse_timezone_offset(&self.timezone_offset) {
             self.set_error(error);
             return;
@@ -2483,15 +2303,24 @@ impl MnemaGuiApp {
             database_url: self.normalized_database_url(),
             dark_mode: self.dark_mode,
             timezone_offset: self.timezone_offset.trim().to_string(),
+            timezone_mode: self.timezone_mode,
+            manual_timezone: self.manual_timezone.trim().to_string(),
             availability_start: self.availability_start.trim().to_string(),
             availability_end: self.availability_end.trim().to_string(),
             home_task_density: self.home_task_density,
             home_task_sort: self.home_task_sort,
+            task_grouping: self.workspace_ui.task_grouping,
             llm_provider: self.llm_provider,
             ollama_url: self.ollama_url.trim().to_string(),
             openai_url: self.openai_url.trim().to_string(),
             planning_model: self.planning_model.trim().to_string(),
             routine_model: self.routine_model.trim().to_string(),
+            read_notifications: self
+                .workspace_ui
+                .read_notifications
+                .iter()
+                .cloned()
+                .collect(),
         };
 
         match save_config(&config) {
@@ -2504,6 +2333,7 @@ impl MnemaGuiApp {
                 self.planning_model = config.planning_model;
                 self.routine_model = config.routine_model;
                 self.timezone_offset = config.timezone_offset;
+                self.applied_timezone_mode = config.timezone_mode;
                 self.availability_start = config.availability_start;
                 self.availability_end = config.availability_end;
                 self.home_task_density = config.home_task_density;
@@ -2550,13 +2380,6 @@ impl MnemaGuiApp {
 
     fn handle_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
         match action {
-            MenuAction::Refresh => {
-                self.refresh_tasks();
-                self.refresh_projects();
-                self.refresh_task_context();
-                self.refresh_schedule();
-                self.refresh_schedule_month();
-            }
             MenuAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             MenuAction::Undo => self.undo_status_change(),
             MenuAction::Redo => self.redo_status_change(),
@@ -2566,9 +2389,23 @@ impl MnemaGuiApp {
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::T,
+            ))
+        }) {
+            self.open_task_capture(ctx);
+            return;
+        }
+        if self.workspace_ui.capture.open {
+            return;
+        }
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+
+        self.calendar_keyboard_shortcuts(ctx);
 
         let redo = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -2596,801 +2433,41 @@ impl MnemaGuiApp {
 
 impl eframe::App for MnemaGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let appearance = (
+            self.dark_mode,
+            self.home_task_density,
+            self.home_task_sort,
+            self.workspace_ui.task_grouping,
+        );
         self.handle_native_menu(ui.ctx());
         self.handle_keyboard_shortcuts(ui.ctx());
 
-        let dark_factor = ui.ctx().animate_bool_with_time(
-            egui::Id::new("mnema_theme_transition"),
-            self.dark_mode,
-            0.28,
-        );
-        configure_style(ui.ctx(), dark_factor, self.dark_mode);
-        if (0.0..1.0).contains(&dark_factor) {
-            ui.ctx().request_repaint();
+        let dark_factor = if self.dark_mode { 1.0 } else { 0.0 };
+        if self.workspace_ui.applied_dark_mode != Some(self.dark_mode) {
+            configure_style(ui.ctx(), dark_factor, self.dark_mode);
+            self.workspace_ui.applied_dark_mode = Some(self.dark_mode);
         }
         let palette = Palette::at(dark_factor);
 
-        egui::Panel::top("top_bar").show_inside(ui, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading(logo_text("Mnema").color(palette.brand));
-                    ui.label(
-                        regular_text("PERSONAL PLANNER")
-                            .size(10.0)
-                            .color(palette.muted),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    theme_toggle(ui, &mut self.dark_mode, palette);
-                    if ui.button(format!("{ICON_REFRESH} Refresh")).clicked() {
-                        self.refresh_tasks();
-                        self.refresh_projects();
-                        self.refresh_task_context();
-                        self.refresh_schedule();
-                        self.refresh_schedule_month();
-                        self.refresh_automation_logs();
-                    }
-                    let backend = self
-                        .backend
-                        .map(|backend| match backend {
-                            StorageBackend::Sqlite => "SQLite",
-                            StorageBackend::Postgres => "PostgreSQL",
-                        })
-                        .unwrap_or("Disconnected");
-                    ui.label(backend);
-                });
-            });
-            ui.add_space(8.0);
-        });
-        self.sync_native_menu_theme();
-
-        egui::Panel::left("navigation")
-            .resizable(false)
-            .exact_size(168.0)
-            .show_inside(ui, |ui| {
-                ui.add_space(12.0);
-                nav_button(ui, &mut self.view, View::Home, ICON_HOME, "Home");
-                nav_button(ui, &mut self.view, View::Inbox, ICON_INBOX, "Inbox");
-                nav_button(ui, &mut self.view, View::Projects, ICON_FOLDER, "Projects");
-                nav_button(ui, &mut self.view, View::Schedule, ICON_EVENT, "Schedule");
-                nav_button(ui, &mut self.view, View::Calendar, ICON_EVENT, "Calendar");
-                nav_button(ui, &mut self.view, View::Habits, ICON_HABIT, "Habits");
-                nav_button(
-                    ui,
-                    &mut self.view,
-                    View::Assistant,
-                    ICON_ASSISTANT,
-                    "Assistant",
-                );
-                nav_button(ui, &mut self.view, View::Activity, ICON_HISTORY, "Activity");
-                ui.separator();
-                nav_button(
-                    ui,
-                    &mut self.view,
-                    View::Settings,
-                    ICON_SETTINGS,
-                    "Settings",
-                );
-            });
-        if self.view == View::Home && self.last_view != View::Home {
-            self.scroll_home_agenda_to_now = true;
+        self.show_shell(ui, palette);
+        self.show_task_details(ui.ctx(), palette);
+        self.show_calendar_event_details(ui.ctx(), palette);
+        self.show_task_capture(ui.ctx(), palette);
+        self.automatic_refresh(ui.ctx());
+        if appearance
+            != (
+                self.dark_mode,
+                self.home_task_density,
+                self.home_task_sort,
+                self.workspace_ui.task_grouping,
+            )
+        {
+            self.persist_ui_preferences();
         }
-        self.last_view = self.view;
-
-        egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
-            ui.add_space(6.0);
-            if let Some(error) = &self.error {
-                ui.colored_label(palette.error, error);
-            } else {
-                ui.label(&self.message);
-            }
-            ui.add_space(6.0);
-        });
-
-        egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
-            View::Home => self.show_home(ui, palette),
-            View::Inbox => self.show_inbox(ui, palette),
-            View::Projects => self.show_projects(ui, palette),
-            View::Schedule => self.show_schedule(ui, palette),
-            View::Calendar => self.show_calendar(ui, palette),
-            View::Habits => self.show_habits(ui, palette),
-            View::Assistant => self.show_assistant(ui, palette),
-            View::Activity => self.show_activity(ui, palette),
-            View::Settings => self.show_settings(ui, palette),
-        });
     }
 }
 
 impl MnemaGuiApp {
-    fn show_home(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Home", palette);
-        let mut task_action = None;
-        let mut plan = false;
-        let mut apply_plan = false;
-        let mut repair_from_now = false;
-        let mut home_date_changed = false;
-        let mut scroll_home_agenda_to_now = false;
-        let timezone = self.app_timezone();
-        let sorted_home_tasks = sorted_tasks(&self.tasks, self.home_task_sort);
-
-        ui.columns(2, |columns| {
-            columns[0].horizontal(|ui| {
-                ui.label(bold_text("Tasks").color(palette.section));
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    egui::ComboBox::from_id_salt("home_task_sort")
-                        .selected_text(self.home_task_sort.label())
-                        .width(120.0)
-                        .show_ui(ui, |ui| {
-                            for mode in [
-                                TaskSortMode::DueDate,
-                                TaskSortMode::Estimate,
-                                TaskSortMode::Importance,
-                                TaskSortMode::Created,
-                            ] {
-                                ui.selectable_value(&mut self.home_task_sort, mode, mode.label());
-                            }
-                        });
-                    ui.label(regular_text("Sort").size(12.0).color(palette.muted));
-                });
-            });
-            columns[0].add_space(6.0);
-            task_action = task_list(
-                &mut columns[0],
-                "home_tasks",
-                &sorted_home_tasks,
-                &self.statuses,
-                &self.status_groups,
-                &self.lists,
-                &self.projects,
-                self.confirming_delete_task_id.as_ref(),
-                &mut self.inline_task_edit,
-                Some(360.0),
-                self.home_task_density,
-                timezone,
-                palette,
-            );
-            if let Some(action) = done_task_section(
-                &mut columns[0],
-                &self.done_tasks,
-                &self.statuses,
-                &self.status_groups,
-                &self.lists,
-                &self.projects,
-                &mut self.show_done_tasks,
-                &mut self.done_task_limit,
-                self.home_task_density,
-                palette,
-            ) {
-                task_action = Some(action);
-            }
-
-            columns[1].horizontal(|ui| {
-                ui.label(bold_text("Agenda").color(palette.section));
-                ui.add_space(12.0);
-                let date_output = date_editor_with_output(ui, &mut self.target_date, timezone);
-                if date_output.changed {
-                    home_date_changed = true;
-                }
-                if date_output.today_again {
-                    scroll_home_agenda_to_now = true;
-                }
-                if ui.button("Plan").clicked() {
-                    plan = true;
-                }
-                if self.auto_preview.is_some() && ui.button("Apply preview").clicked() {
-                    apply_plan = true;
-                }
-                egui::ComboBox::from_id_salt("home_planning_days")
-                    .selected_text(format!("{} day", self.planning_days))
-                    .width(72.0)
-                    .show_ui(ui, |ui| {
-                        for days in [1, 3, 7] {
-                            ui.selectable_value(
-                                &mut self.planning_days,
-                                days,
-                                format!("{days} days"),
-                            );
-                        }
-                    });
-                if ui.button("Repair preview").clicked() {
-                    repair_from_now = true;
-                }
-            });
-
-            columns[1].add_space(8.0);
-            let target_date = parse_required_date(&self.target_date)
-                .unwrap_or_else(|_| OffsetDateTime::now_utc().to_offset(timezone).date());
-            let agenda_output = home_agenda_view(
-                &mut columns[1],
-                target_date,
-                self.auto_preview.as_ref(),
-                self.plan.as_ref(),
-                self.plan_source.clone(),
-                &self.schedule,
-                self.scroll_home_agenda_to_now || scroll_home_agenda_to_now,
-                timezone,
-                palette,
-            );
-            repair_from_now |= agenda_output.repair_clicked;
-            if let Some(request) = agenda_output.manual_schedule {
-                self.create_manual_schedule_block(request);
-            }
-            if let Some(request) = agenda_output.move_schedule {
-                self.move_schedule_block(request);
-            }
-        });
-        if self.scroll_home_agenda_to_now || scroll_home_agenda_to_now {
-            self.scroll_home_agenda_to_now = false;
-        }
-
-        if let Some(action) = task_action {
-            self.handle_task_action(action);
-        }
-        if home_date_changed {
-            self.plan = None;
-            self.auto_preview = None;
-            self.refresh_schedule();
-        }
-        if plan {
-            self.preview_auto_schedule();
-        }
-        if apply_plan {
-            self.apply_auto_schedule();
-        }
-        if repair_from_now {
-            self.repair_from_time = format_hm(self.now_in_timezone());
-            self.repair_schedule(false);
-        }
-    }
-
-    fn show_inbox(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Inbox", palette);
-        let timezone = self.app_timezone();
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [560.0, INPUT_HEIGHT],
-                text_field(
-                    &mut self.quick_capture,
-                    "Quick capture: Write proposal tomorrow 45m",
-                ),
-            );
-            if ui.button("Capture").clicked() {
-                self.capture_quick_task();
-            }
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [340.0, INPUT_HEIGHT],
-                text_field(&mut self.task_title, "Task title"),
-            );
-            ui.label("Due");
-            date_editor(ui, &mut self.due_date, timezone);
-            ui.label("Estimate");
-            minutes_editor(ui, &mut self.minutes);
-            if ui.button("Add").clicked() {
-                self.add_task();
-            }
-        });
-        ui.add_space(12.0);
-        if let Some(action) = task_list(
-            ui,
-            "inbox_tasks",
-            &self.tasks,
-            &self.statuses,
-            &self.status_groups,
-            &self.lists,
-            &self.projects,
-            self.confirming_delete_task_id.as_ref(),
-            &mut self.inline_task_edit,
-            None,
-            TaskListDensity::Normal,
-            timezone,
-            palette,
-        ) {
-            self.handle_task_action(action);
-        }
-    }
-
-    fn show_assistant(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Assistant", palette);
-        ui.label(regular_text(assistant_provider_label(self.llm_provider)).color(palette.muted));
-        ui.add_space(8.0);
-        ScrollArea::vertical()
-            .id_salt("assistant_messages")
-            .max_height(480.0)
-            .show(ui, |ui| {
-                for message in &self.assistant_messages {
-                    ui.group(|ui| {
-                        ui.label(bold_text(message.role).color(palette.section));
-                        ui.label(message.content.as_str());
-                    });
-                    ui.add_space(8.0);
-                }
-            });
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [560.0, INPUT_HEIGHT],
-                text_field(&mut self.assistant_input, "Ask or capture a task"),
-            );
-            if ui.button("Send").clicked() {
-                self.send_assistant_message();
-            }
-        });
-    }
-
-    fn show_projects(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Projects", palette);
-        let timezone = self.app_timezone();
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut self.project_view_mode,
-                ProjectViewMode::Details,
-                "Details",
-            );
-            ui.selectable_value(&mut self.project_view_mode, ProjectViewMode::Gantt, "Gantt");
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [260.0, INPUT_HEIGHT],
-                text_field(&mut self.project_title, "Project title"),
-            );
-            ui.label("Start");
-            date_editor(ui, &mut self.project_start_date, timezone);
-            ui.label("End");
-            date_editor(ui, &mut self.project_end_date, timezone);
-            if ui.button("Add").clicked() {
-                self.add_project();
-            }
-        });
-        ui.add_space(12.0);
-
-        if self.project_view_mode == ProjectViewMode::Gantt {
-            if let Some(project_id) = project_gantt_view(
-                ui,
-                &self.projects,
-                self.selected_project_id.as_ref(),
-                &self.milestones,
-                palette,
-            ) {
-                self.selected_project_id = Some(project_id);
-                self.refresh_project_children();
-            }
-            return;
-        }
-
-        let mut select_project = None;
-        ui.columns(2, |columns| {
-            columns[0].label(bold_text("Projects").color(palette.section));
-            columns[0].add_space(6.0);
-            ScrollArea::vertical()
-                .id_salt("project_list")
-                .max_height(520.0)
-                .show(&mut columns[0], |ui| {
-                    for project in &self.projects {
-                        let selected = self.selected_project_id.as_ref() == Some(&project.id);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized(
-                                    [120.0, 30.0],
-                                    egui::Button::selectable(selected, "Select"),
-                                )
-                                .clicked()
-                            {
-                                select_project = Some(project.id.clone());
-                            }
-                            ui.label(bold_text(project.title.as_str()));
-                        });
-                        let mut fields = Vec::new();
-                        if let Some(start_date) = project.start_date {
-                            fields.push(format!("start {start_date}"));
-                        }
-                        if let Some(end_date) = project.end_date {
-                            fields.push(format!("end {end_date}"));
-                        }
-                        if !fields.is_empty() {
-                            ui.label(regular_text(fields.join(", ")).color(palette.muted));
-                        }
-                        ui.separator();
-                    }
-                });
-
-            columns[1].label(bold_text("Selected").color(palette.section));
-            columns[1].add_space(6.0);
-            if let Some(project_title) = self.selected_project_title() {
-                columns[1].label(bold_text(project_title));
-                columns[1].add_space(8.0);
-                self.show_project_children(&mut columns[1], palette);
-            } else {
-                columns[1].label("No project selected.");
-            }
-        });
-
-        if let Some(project_id) = select_project {
-            self.selected_project_id = Some(project_id);
-            self.refresh_project_children();
-        }
-    }
-
-    fn show_project_children(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        let timezone = self.app_timezone();
-        ui.label(bold_text("Lists").color(palette.section));
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [220.0, INPUT_HEIGHT],
-                text_field(&mut self.project_list_name, "List name"),
-            );
-            if ui.button("Add list").clicked() {
-                self.add_project_list();
-            }
-        });
-        ui.add_space(6.0);
-        if self.project_lists.is_empty() {
-            ui.label("No lists.");
-        } else {
-            for list in &self.project_lists {
-                ui.label(format!(
-                    "{} · {}",
-                    list.name,
-                    list_view_type_label(&list.view_type)
-                ));
-            }
-        }
-
-        ui.add_space(14.0);
-        ui.label(bold_text("Milestones").color(palette.section));
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [220.0, INPUT_HEIGHT],
-                text_field(&mut self.milestone_title, "Milestone title"),
-            );
-            ui.label("Target");
-            date_editor(ui, &mut self.milestone_target_date, timezone);
-            if ui.button("Add milestone").clicked() {
-                self.add_milestone();
-            }
-        });
-        ui.add_space(6.0);
-        if self.milestones.is_empty() {
-            ui.label("No milestones.");
-        } else {
-            for milestone in &self.milestones {
-                ui.horizontal(|ui| {
-                    ui.label(bold_text(milestone.title.as_str()));
-                    ui.label(regular_text(milestone.target_date.to_string()).color(palette.due));
-                    ui.label(
-                        regular_text(milestone_status_label(&milestone.status))
-                            .color(palette.muted),
-                    );
-                });
-            }
-        }
-    }
-
-    fn show_activity(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Activity", palette);
-        let timezone = self.app_timezone();
-        ui.horizontal(|ui| {
-            if ui.button("Refresh").clicked() {
-                self.refresh_automation_logs();
-            }
-            ui.label(format!("{} logs", self.automation_logs.len()));
-        });
-        ui.add_space(10.0);
-
-        if self.automation_logs.is_empty() {
-            ui.label("No activity yet.");
-            return;
-        }
-
-        ScrollArea::vertical()
-            .id_salt("activity_logs")
-            .show(ui, |ui| {
-                for log in &self.automation_logs {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(bold_text(automation_action_label(&log.action_type)));
-                            ui.label(
-                                regular_text(format_hm_in(log.created_at, timezone))
-                                    .color(palette.muted),
-                            );
-                        });
-                        if let Some(title) = automation_log_title(log) {
-                            ui.label(title);
-                        }
-                        if let Some(explanation) = &log.explanation {
-                            ui.label(regular_text(explanation.as_str()).color(palette.muted));
-                        }
-                    });
-                    ui.add_space(8.0);
-                }
-            });
-    }
-
-    fn show_schedule(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Schedule", palette);
-        let timezone = self.app_timezone();
-        let mut preview_clicked = false;
-        let mut apply_clicked = false;
-        let mut schedule_date_changed = false;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.schedule_view_mode, ScheduleViewMode::Day, "Day");
-            ui.selectable_value(
-                &mut self.schedule_view_mode,
-                ScheduleViewMode::Calendar,
-                "Calendar",
-            );
-            ui.separator();
-            ui.label("Date");
-            if date_editor_with_output(ui, &mut self.target_date, timezone).changed {
-                schedule_date_changed = true;
-            }
-            if self.schedule_view_mode == ScheduleViewMode::Calendar {
-                if ui.button("Prev month").clicked() {
-                    shift_month(&mut self.target_date, -1);
-                    self.refresh_schedule();
-                    self.refresh_schedule_month();
-                }
-                if ui.button("Next month").clicked() {
-                    shift_month(&mut self.target_date, 1);
-                    self.refresh_schedule();
-                    self.refresh_schedule_month();
-                }
-            }
-            if ui.button("Load").clicked() {
-                self.refresh_schedule();
-                self.refresh_schedule_month();
-            }
-            ui.separator();
-            egui::ComboBox::from_id_salt("schedule_planning_days")
-                .selected_text(format!("{} day", self.planning_days))
-                .width(76.0)
-                .show_ui(ui, |ui| {
-                    for days in [1, 3, 7] {
-                        ui.selectable_value(&mut self.planning_days, days, format!("{days} days"));
-                    }
-                });
-            if ui.button("Preview plan").clicked() {
-                preview_clicked = true;
-            }
-            if self.auto_preview.is_some() && ui.button("Apply").clicked() {
-                apply_clicked = true;
-            }
-        });
-        ui.add_space(12.0);
-
-        if schedule_date_changed {
-            self.auto_preview = None;
-            self.refresh_schedule();
-            self.refresh_schedule_month();
-        }
-
-        if let Some(preview) = &self.auto_preview {
-            auto_preview_summary(ui, preview, palette);
-            ui.add_space(10.0);
-        }
-
-        if preview_clicked {
-            self.preview_auto_schedule();
-        }
-        if apply_clicked {
-            self.apply_auto_schedule();
-        }
-
-        let target_date = match parse_required_date(&self.target_date) {
-            Ok(date) => date,
-            Err(error) => {
-                ui.colored_label(palette.error, error.to_string());
-                return;
-            }
-        };
-
-        match self.schedule_view_mode {
-            ScheduleViewMode::Day => {
-                if self.schedule.is_empty() {
-                    ui.label("No saved schedule blocks.");
-                    return;
-                }
-
-                let output =
-                    schedule_calendar_view(ui, target_date, &self.schedule, timezone, palette);
-                if let Some(action) = output.action {
-                    self.handle_schedule_action(action);
-                }
-                if let Some(request) = output.move_schedule {
-                    self.move_schedule_block(request);
-                }
-                self.show_schedule_block_editor(ui, palette);
-            }
-            ScheduleViewMode::Calendar => {
-                if let Some(selected_date) = schedule_month_calendar(
-                    ui,
-                    target_date,
-                    &self.schedule_month,
-                    timezone,
-                    palette,
-                ) {
-                    let month_changed = selected_date.month() != target_date.month()
-                        || selected_date.year() != target_date.year();
-                    self.target_date = selected_date.to_string();
-                    self.refresh_schedule();
-                    if month_changed {
-                        self.refresh_schedule_month();
-                    }
-                }
-            }
-        }
-    }
-
-    fn show_habits(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Habits", palette);
-        ui.label(
-            regular_text("繰り返したい行動を、空き時間へ自動配置します。").color(palette.muted),
-        );
-        ui.add_space(10.0);
-
-        let mut add_clicked = false;
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0_f32, palette.border))
-            .corner_radius(10.0)
-            .inner_margin(14.0)
-            .show(ui, |ui| {
-                ui.label(bold_text("New habit").color(palette.section));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [300.0, INPUT_HEIGHT],
-                        text_field(&mut self.habit_draft.title, "Morning walk"),
-                    );
-                    ui.label("Duration");
-                    ui.add_sized(
-                        [72.0, INPUT_HEIGHT],
-                        text_field(&mut self.habit_draft.duration_minutes, "30"),
-                    );
-                    ui.label("min");
-                });
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        &mut self.habit_draft.schedule,
-                        HabitScheduleChoice::Daily,
-                        "Daily",
-                    );
-                    ui.radio_value(
-                        &mut self.habit_draft.schedule,
-                        HabitScheduleChoice::Weekdays,
-                        "Selected days",
-                    );
-                    ui.separator();
-                    ui.radio_value(
-                        &mut self.habit_draft.flexibility,
-                        HabitFlexibility::Required,
-                        "Required",
-                    );
-                    ui.radio_value(
-                        &mut self.habit_draft.flexibility,
-                        HabitFlexibility::Flexible,
-                        "Flexible",
-                    );
-                });
-                if self.habit_draft.schedule == HabitScheduleChoice::Weekdays {
-                    ui.horizontal(|ui| {
-                        for (index, label) in DAY_LABELS.iter().enumerate() {
-                            ui.checkbox(&mut self.habit_draft.weekdays[index], *label);
-                        }
-                    });
-                }
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut self.habit_draft.has_preferred_window,
-                        "Preferred window",
-                    );
-                    if self.habit_draft.has_preferred_window {
-                        ui.add_sized(
-                            [82.0, INPUT_HEIGHT],
-                            text_field(&mut self.habit_draft.preferred_start, "07:00"),
-                        );
-                        ui.label("to");
-                        ui.add_sized(
-                            [82.0, INPUT_HEIGHT],
-                            text_field(&mut self.habit_draft.preferred_end, "09:00"),
-                        );
-                    }
-                    if ui.button("Add habit").clicked() {
-                        add_clicked = true;
-                    }
-                });
-            });
-
-        if add_clicked {
-            self.add_habit();
-        }
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                bold_text(format!("Active habits ({})", self.habits.len())).color(palette.section),
-            );
-            if ui.button("Refresh").clicked() {
-                self.refresh_habits();
-            }
-        });
-
-        let mut disable = None;
-        let mut skip = None;
-        let mut snooze = None;
-        ScrollArea::vertical().show(ui, |ui| {
-            for habit in &self.habits {
-                egui::Frame::new()
-                    .fill(palette.surface)
-                    .stroke(Stroke::new(1.0_f32, palette.border))
-                    .corner_radius(8.0)
-                    .inner_margin(12.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(bold_text(&habit.title).color(palette.text));
-                            ui.label(
-                                regular_text(format!("{} min", habit.duration_minutes))
-                                    .color(palette.muted),
-                            );
-                            ui.label(
-                                regular_text(match habit.flexibility {
-                                    HabitFlexibility::Required => "Required",
-                                    HabitFlexibility::Flexible => "Flexible",
-                                })
-                                .color(palette.accent),
-                            );
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Disable").clicked() {
-                                    disable = Some(habit.id.clone());
-                                }
-                            });
-                        });
-                        ui.label(regular_text(habit_schedule_label(habit)).color(palette.muted));
-                        for occurrence in self
-                            .habit_occurrences
-                            .iter()
-                            .filter(|occurrence| occurrence.habit_id == habit.id)
-                            .take(3)
-                        {
-                            ui.horizontal(|ui| {
-                                ui.label(occurrence.occurrence_date.to_string());
-                                ui.label(
-                                    regular_text(habit_occurrence_state_label(occurrence.state))
-                                        .color(palette.muted),
-                                );
-                                if matches!(
-                                    occurrence.state,
-                                    HabitOccurrenceState::Pending
-                                        | HabitOccurrenceState::Snoozed
-                                        | HabitOccurrenceState::Scheduled
-                                ) {
-                                    if ui.small_button("Skip").clicked() {
-                                        skip = Some(occurrence.id.clone());
-                                    }
-                                    if ui.small_button("Snooze 24h").clicked() {
-                                        snooze = Some(occurrence.id.clone());
-                                    }
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(8.0);
-            }
-        });
-        if let Some(id) = disable {
-            self.disable_habit(id);
-        }
-        if let Some(id) = skip {
-            self.skip_habit_occurrence(id);
-        }
-        if let Some(id) = snooze {
-            self.snooze_habit_occurrence(id);
-        }
-    }
-
     fn show_calendar(&mut self, ui: &mut egui::Ui, palette: Palette) {
         section_header(ui, "Calendar", palette);
         let mut refresh = false;
@@ -3517,211 +2594,6 @@ impl MnemaGuiApp {
         }
     }
 
-    fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        section_header(ui, "Settings", palette);
-        egui::Grid::new("settings_grid")
-            .num_columns(2)
-            .spacing([14.0, 10.0])
-            .show(ui, |ui| {
-                ui.label("Vault");
-                ui.add_sized(
-                    [520.0, INPUT_HEIGHT],
-                    text_field(&mut self.vault_path, "Vault path"),
-                );
-                ui.end_row();
-
-                ui.label("Backend");
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        &mut self.selected_backend,
-                        DesktopStorageBackend::Sqlite,
-                        "SQLite",
-                    );
-                    ui.radio_value(
-                        &mut self.selected_backend,
-                        DesktopStorageBackend::Postgres,
-                        "PostgreSQL",
-                    );
-                });
-                ui.end_row();
-
-                ui.label("SQLite DB");
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [420.0, INPUT_HEIGHT],
-                        text_field(&mut self.sqlite_path, "SQLite database path"),
-                    );
-                    if ui.button("Default").clicked() {
-                        self.sqlite_path = default_sqlite_path().display().to_string();
-                    }
-                });
-                ui.end_row();
-
-                ui.label("PostgreSQL URL");
-                ui.add_sized(
-                    [520.0, INPUT_HEIGHT],
-                    text_field(&mut self.database_url, DEFAULT_POSTGRES_URL),
-                );
-                ui.end_row();
-
-                ui.label("Timezone");
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [220.0, INPUT_HEIGHT],
-                        text_field(&mut self.timezone_offset, "Asia/Tokyo"),
-                    );
-                    if ui.button("Tokyo").clicked() {
-                        self.timezone_offset = "Asia/Tokyo".to_string();
-                    }
-                    if ui.button("UTC").clicked() {
-                        self.timezone_offset = "UTC".to_string();
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Planning hours");
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [92.0, INPUT_HEIGHT],
-                        text_field(&mut self.availability_start, "09:00"),
-                    );
-                    ui.label(regular_text("to").color(palette.muted));
-                    ui.add_sized(
-                        [92.0, INPUT_HEIGHT],
-                        text_field(&mut self.availability_end, "17:00"),
-                    );
-                    if ui.button("Default").clicked() {
-                        self.availability_start = default_availability_start();
-                        self.availability_end = default_availability_end();
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Sleep protection");
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [92.0, INPUT_HEIGHT],
-                        text_field(&mut self.sleep_start, "23:00"),
-                    );
-                    ui.label(regular_text("to").color(palette.muted));
-                    ui.add_sized(
-                        [92.0, INPUT_HEIGHT],
-                        text_field(&mut self.sleep_end, "07:00"),
-                    );
-                    ui.label(regular_text("hard busy").color(palette.muted));
-                });
-                ui.end_row();
-
-                ui.label("Travel buffer");
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [92.0, INPUT_HEIGHT],
-                        text_field(&mut self.travel_buffer_minutes, "15"),
-                    );
-                    ui.label("minutes before / after");
-                });
-                ui.end_row();
-
-                ui.label("Home tasks");
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        &mut self.home_task_density,
-                        TaskListDensity::Normal,
-                        TaskListDensity::Normal.label(),
-                    );
-                    ui.radio_value(
-                        &mut self.home_task_density,
-                        TaskListDensity::Compact,
-                        TaskListDensity::Compact.label(),
-                    );
-                });
-                ui.end_row();
-
-                ui.label("Task sort");
-                egui::ComboBox::from_id_salt("settings_home_task_sort")
-                    .selected_text(self.home_task_sort.label())
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            TaskSortMode::DueDate,
-                            TaskSortMode::Estimate,
-                            TaskSortMode::Importance,
-                            TaskSortMode::Created,
-                        ] {
-                            ui.selectable_value(&mut self.home_task_sort, mode, mode.label());
-                        }
-                    });
-                ui.end_row();
-
-                ui.label("LLM provider");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.llm_provider, DesktopLlmProvider::Disabled, "Off");
-                    ui.radio_value(&mut self.llm_provider, DesktopLlmProvider::Ollama, "Ollama");
-                    ui.radio_value(
-                        &mut self.llm_provider,
-                        DesktopLlmProvider::OpenAiCompatible,
-                        "OpenAI compatible",
-                    );
-                });
-                ui.end_row();
-
-                ui.label("Ollama URL");
-                ui.add_sized(
-                    [520.0, INPUT_HEIGHT],
-                    text_field(&mut self.ollama_url, "http://localhost:11434"),
-                );
-                ui.end_row();
-
-                ui.label("OpenAI URL");
-                ui.add_sized(
-                    [520.0, INPUT_HEIGHT],
-                    text_field(&mut self.openai_url, "https://api.openai.com"),
-                );
-                ui.end_row();
-
-                ui.label("Planning model");
-                ui.add_sized(
-                    [260.0, INPUT_HEIGHT],
-                    text_field(&mut self.planning_model, "gpt-4.1"),
-                );
-                ui.end_row();
-
-                ui.label("Routine model");
-                ui.add_sized(
-                    [260.0, INPUT_HEIGHT],
-                    text_field(&mut self.routine_model, "gpt-4.1-mini"),
-                );
-                ui.end_row();
-            });
-
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button("Save settings").clicked() {
-                self.save_settings();
-            }
-            if ui.button("Connect").clicked() {
-                self.connect_and_refresh();
-            }
-        });
-        ui.add_space(10.0);
-        ui.label(format!(
-            "Connected backend: {}",
-            self.backend
-                .map(|backend| match backend {
-                    StorageBackend::Sqlite => "SQLite",
-                    StorageBackend::Postgres => "PostgreSQL",
-                })
-                .unwrap_or("Disconnected")
-        ));
-        ui.label(format!(
-            "Selected backend: {}",
-            self.selected_backend.label()
-        ));
-        ui.label(format!("Config: {}", config_path().display()));
-        if !self.settings_message.is_empty() {
-            ui.label(regular_text(self.settings_message.as_str()).color(palette.success));
-        }
-    }
-
     fn show_schedule_block_editor(&mut self, ui: &mut egui::Ui, palette: Palette) {
         if self.editing_schedule_block_id.is_none() {
             return;
@@ -3729,20 +2601,37 @@ impl MnemaGuiApp {
 
         ui.add_space(8.0);
         ui.separator();
-        ui.label(bold_text("Edit schedule time").color(palette.section));
+        ui.label(bold_text("日時を編集").color(palette.section));
+        ui.horizontal_wrapped(|ui| {
+            ui.label("開始");
+            ui.add_sized(
+                [125.0, 30.0],
+                text_field(
+                    &mut self.workspace_ui.calendar.edit_start_date,
+                    "YYYY-MM-DD",
+                ),
+            );
+            ui.add_sized(
+                [72.0, 30.0],
+                text_field(&mut self.schedule_edit_start, "09:00"),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("終了");
+            ui.add_sized(
+                [125.0, 30.0],
+                text_field(&mut self.workspace_ui.calendar.edit_end_date, "YYYY-MM-DD"),
+            );
+            ui.add_sized(
+                [72.0, 30.0],
+                text_field(&mut self.schedule_edit_end, "10:00"),
+            );
+        });
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            ui.label("Start");
-            time_editor(ui, &mut self.schedule_edit_start);
-            ui.label("End");
-            time_editor(ui, &mut self.schedule_edit_end);
-            if ui.button("Save").clicked() {
-                save = true;
-            }
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
+            save = components::button(ui, "日時を保存", true, palette).clicked();
+            cancel = components::button(ui, "キャンセル", false, palette).clicked();
         });
 
         if save {
@@ -3775,7 +2664,6 @@ struct Palette {
     selected_text: Color32,
     warning: Color32,
     success: Color32,
-    due: Color32,
     error: Color32,
 }
 
@@ -3784,93 +2672,93 @@ impl Palette {
         let t = dark_factor.clamp(0.0, 1.0);
         Self {
             text: mix_color(
-                Color32::from_rgb(23, 32, 25),
-                Color32::from_rgb(238, 244, 239),
+                Color32::from_rgb(40, 42, 45),
+                Color32::from_rgb(235, 235, 238),
                 t,
             ),
             muted: mix_color(
-                Color32::from_rgb(93, 105, 95),
-                Color32::from_rgb(178, 189, 180),
+                Color32::from_rgb(118, 119, 126),
+                Color32::from_rgb(153, 155, 164),
                 t,
             ),
             brand: mix_color(
-                Color32::from_rgb(33, 75, 52),
-                Color32::from_rgb(168, 213, 180),
+                Color32::from_rgb(58, 96, 78),
+                Color32::from_rgb(164, 195, 177),
                 t,
             ),
             section: mix_color(
-                Color32::from_rgb(33, 75, 52),
-                Color32::from_rgb(218, 234, 222),
+                Color32::from_rgb(58, 96, 78),
+                Color32::from_rgb(230, 231, 235),
                 t,
             ),
             panel: mix_color(
-                Color32::from_rgb(243, 245, 242),
-                Color32::from_rgb(17, 22, 18),
+                Color32::from_rgb(247, 247, 245),
+                Color32::from_rgb(29, 30, 33),
                 t,
             ),
             surface: mix_color(
                 Color32::from_rgb(255, 255, 255),
-                Color32::from_rgb(25, 32, 27),
+                Color32::from_rgb(38, 39, 43),
                 t,
             ),
             faint: mix_color(
-                Color32::from_rgb(237, 241, 237),
-                Color32::from_rgb(37, 46, 39),
+                Color32::from_rgb(239, 240, 238),
+                Color32::from_rgb(47, 48, 53),
                 t,
             ),
             input: mix_color(
                 Color32::from_rgb(255, 255, 255),
-                Color32::from_rgb(12, 17, 24),
+                Color32::from_rgb(32, 33, 37),
                 t,
             ),
             code_bg: mix_color(
                 Color32::from_rgb(238, 242, 246),
-                Color32::from_rgb(27, 34, 46),
+                Color32::from_rgb(39, 40, 45),
                 t,
             ),
             control_bg: mix_color(
-                Color32::from_rgb(246, 249, 252),
-                Color32::from_rgb(28, 37, 50),
+                Color32::from_rgb(241, 242, 240),
+                Color32::from_rgb(46, 47, 52),
                 t,
             ),
             control_hover: mix_color(
-                Color32::from_rgb(220, 234, 222),
-                Color32::from_rgb(45, 61, 50),
+                Color32::from_rgb(230, 237, 233),
+                Color32::from_rgb(53, 55, 61),
                 t,
             ),
             control_active: mix_color(
-                Color32::from_rgb(51, 104, 74),
-                Color32::from_rgb(130, 189, 147),
+                Color32::from_rgb(64, 111, 87),
+                Color32::from_rgb(151, 190, 166),
                 t,
             ),
             switch_bg: mix_color(
                 Color32::from_rgb(224, 231, 239),
-                Color32::from_rgb(18, 25, 36),
+                Color32::from_rgb(31, 32, 36),
                 t,
             ),
             border: mix_color(
-                Color32::from_rgb(223, 229, 223),
-                Color32::from_rgb(44, 56, 47),
+                Color32::from_rgb(225, 226, 223),
+                Color32::from_rgb(55, 56, 62),
                 t,
             ),
             border_strong: mix_color(
-                Color32::from_rgb(203, 212, 204),
-                Color32::from_rgb(58, 73, 62),
+                Color32::from_rgb(204, 207, 203),
+                Color32::from_rgb(76, 78, 85),
                 t,
             ),
             accent: mix_color(
-                Color32::from_rgb(51, 104, 74),
-                Color32::from_rgb(130, 189, 147),
+                Color32::from_rgb(64, 111, 87),
+                Color32::from_rgb(151, 190, 166),
                 t,
             ),
             selected_fill: mix_color(
-                Color32::from_rgb(220, 234, 222),
-                Color32::from_rgb(38, 61, 44),
+                Color32::from_rgb(230, 237, 233),
+                Color32::from_rgb(53, 64, 59),
                 t,
             ),
             selected_text: mix_color(
-                Color32::from_rgb(33, 75, 52),
-                Color32::from_rgb(238, 244, 239),
+                Color32::from_rgb(58, 96, 78),
+                Color32::from_rgb(235, 235, 238),
                 t,
             ),
             warning: mix_color(
@@ -3881,11 +2769,6 @@ impl Palette {
             success: mix_color(
                 Color32::from_rgb(34, 112, 83),
                 Color32::from_rgb(103, 202, 159),
-                t,
-            ),
-            due: mix_color(
-                Color32::from_rgb(122, 74, 32),
-                Color32::from_rgb(219, 160, 91),
                 t,
             ),
             error: mix_color(
@@ -4020,68 +2903,15 @@ fn configure_style(ctx: &egui::Context, dark_factor: f32, dark_mode: bool) {
     let mut style = egui::Theme::from_dark_mode(dark_mode).default_style();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
     style.visuals = themed_visuals(palette, dark_mode);
+    components::control_style(&mut style);
     ctx.set_global_style(style);
-}
-
-fn nav_button(ui: &mut egui::Ui, view: &mut View, target: View, icon: char, label: &str) {
-    let selected = *view == target;
-    let text = RichText::new(format!("{icon}  {label}")).size(14.0);
-    if ui
-        .add_sized([140.0, 32.0], egui::Button::selectable(selected, text))
-        .clicked()
-    {
-        *view = target;
-    }
-}
-
-fn theme_toggle(ui: &mut egui::Ui, dark_mode: &mut bool, palette: Palette) {
-    ui.allocate_ui_with_layout(
-        THEME_SWITCH_SIZE,
-        egui::Layout::left_to_right(Align::Center),
-        |ui| {
-            let rect = ui.max_rect();
-            ui.painter().rect(
-                rect,
-                16.0,
-                palette.switch_bg,
-                Stroke::new(1.0_f32, palette.border),
-                egui::StrokeKind::Inside,
-            );
-            ui.spacing_mut().button_padding = egui::vec2(5.0, 4.0);
-            ui.spacing_mut().item_spacing.x = 3.0;
-            ui.add_space(3.0);
-            if theme_icon_button(ui, !*dark_mode, ICON_LIGHT_MODE, "Light", palette).clicked() {
-                *dark_mode = false;
-            }
-            if theme_icon_button(ui, *dark_mode, ICON_DARK_MODE, "Dark", palette).clicked() {
-                *dark_mode = true;
-            }
-        },
-    );
-}
-
-fn theme_icon_button(
-    ui: &mut egui::Ui,
-    selected: bool,
-    icon: char,
-    hover_text: &'static str,
-    palette: Palette,
-) -> egui::Response {
-    let text = material_icon_text(
-        icon,
-        18.0,
-        if selected {
-            palette.selected_text
-        } else {
-            palette.text
-        },
-    );
-    let mut button = egui::Button::selectable(selected, text).corner_radius(16.0);
-    if selected {
-        button = button.fill(palette.selected_fill);
-    }
-    ui.add_sized([30.0, 30.0], button).on_hover_text(hover_text)
 }
 
 fn regular_text(text: impl Into<String>) -> RichText {
@@ -4111,74 +2941,34 @@ fn material_icon_font(size: f32) -> egui::FontId {
 
 fn text_field<'a>(value: &'a mut String, hint_text: &'static str) -> TextEdit<'a> {
     TextEdit::singleline(value)
+        .margin(egui::Margin::symmetric(9, 4))
         .hint_text(hint_text)
         .vertical_align(Align::Center)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct DateEditorOutput {
-    changed: bool,
-    today_again: bool,
-}
-
-fn date_editor(ui: &mut egui::Ui, value: &mut String, timezone: UtcOffset) -> bool {
-    date_editor_with_output(ui, value, timezone).changed
-}
-
-fn date_editor_with_output(
+fn date_editor(
     ui: &mut egui::Ui,
     value: &mut String,
     timezone: UtcOffset,
-) -> DateEditorOutput {
-    let mut output = DateEditorOutput {
-        changed: ui
-            .add_sized([118.0, INPUT_HEIGHT], text_field(value, "YYYY-MM-DD"))
-            .changed(),
-        today_again: false,
-    };
-    if ui.button("‹").clicked() {
-        shift_date(value, -1, timezone);
-        output.changed = true;
-    }
-    if ui.button("Today").clicked() {
-        let today = OffsetDateTime::now_utc()
-            .to_offset(timezone)
-            .date()
-            .to_string();
-        if value.trim() == today {
-            output.today_again = true;
-        } else {
-            *value = today;
-            output.changed = true;
-        }
-    }
-    if ui.button("›").clicked() {
-        shift_date(value, 1, timezone);
-        output.changed = true;
-    }
-    output
-}
-
-fn inline_text_field<'a>(value: &'a mut String, width: f32) -> TextEdit<'a> {
-    TextEdit::singleline(value)
-        .desired_width(width)
-        .vertical_align(Align::Center)
-        .frame(egui::Frame::NONE)
-}
-
-fn shift_date(value: &mut String, days: i64, timezone: UtcOffset) {
-    let base = parse_optional_date(value)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| OffsetDateTime::now_utc().to_offset(timezone).date());
-    let shifted = if days < 0 {
-        base.previous_day().unwrap_or(base)
+    palette: Palette,
+) -> bool {
+    let current = parse_optional_date(value).ok().flatten();
+    let today = OffsetDateTime::now_utc().to_offset(timezone).date();
+    let response = components::button(
+        ui,
+        &current
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "日付を設定".into()),
+        false,
+        palette,
+    );
+    if let Some(date) = date_picker::show(ui, &response, current, today, "日付", palette) {
+        *value = date.map(|date| date.to_string()).unwrap_or_default();
+        true
     } else {
-        base.next_day().unwrap_or(base)
-    };
-    *value = shifted.to_string();
+        false
+    }
 }
-
 fn shift_month(value: &mut String, months: i32) {
     let base = parse_optional_date(value)
         .ok()
@@ -4196,36 +2986,14 @@ fn minutes_editor(ui: &mut egui::Ui, value: &mut String) {
         egui::DragValue::new(&mut minutes)
             .range(0..=24 * 60)
             .speed(5)
-            .suffix(" min"),
+            .suffix(" 分"),
     );
     if response.changed() {
         *value = minutes.to_string();
     }
-    if ui.button("Clear").clicked() {
+    if ui.button("クリア").clicked() {
         value.clear();
     }
-}
-
-fn time_editor(ui: &mut egui::Ui, value: &mut String) {
-    ui.add_sized([74.0, INPUT_HEIGHT], text_field(value, "HH:MM"));
-    if ui.button("-15").clicked() {
-        shift_time(value, -15);
-    }
-    if ui.button("+15").clicked() {
-        shift_time(value, 15);
-    }
-}
-
-fn shift_time(value: &mut String, minutes: i64) {
-    let Ok(time) = Time::parse(value.trim(), format_description!("[hour]:[minute]")) else {
-        return;
-    };
-    let date = OffsetDateTime::now_utc().date();
-    let shifted = date
-        .with_time(time)
-        .assume_utc()
-        .saturating_add(time::Duration::minutes(minutes));
-    *value = format_hm(shifted);
 }
 
 fn themed_visuals(palette: Palette, dark_mode: bool) -> egui::Visuals {
@@ -4364,278 +3132,6 @@ fn section_header(ui: &mut egui::Ui, title: &str, palette: Palette) {
     ui.add_space(8.0);
 }
 
-fn task_list(
-    ui: &mut egui::Ui,
-    id_salt: &'static str,
-    tasks: &[Task],
-    statuses: &[Status],
-    status_groups: &[StatusGroup],
-    lists: &[List],
-    projects: &[Project],
-    confirming_delete_task_id: Option<&TaskId>,
-    inline_task_edit: &mut Option<TaskInlineEdit>,
-    max_height: Option<f32>,
-    density: TaskListDensity,
-    timezone: UtcOffset,
-    palette: Palette,
-) -> Option<TaskAction> {
-    if tasks.is_empty() {
-        ui.label("No tasks.");
-        return None;
-    }
-
-    let mut action = None;
-    let mut scroll_area = ScrollArea::vertical()
-        .id_salt(id_salt)
-        .auto_shrink([false, false]);
-    if let Some(max_height) = max_height {
-        scroll_area = scroll_area.max_height(max_height);
-    }
-    scroll_area.show(ui, |ui| {
-        for (index, task) in tasks.iter().enumerate() {
-            let row_height = density.row_height();
-            let payload = TaskDragPayload {
-                task_id: task.id.clone(),
-                title: task.title.clone(),
-                estimated_minutes: task.estimated_minutes,
-            };
-            let drag_id = ui.make_persistent_id((id_salt, "task_drag", task.id.clone()));
-            let response = ui
-                .dnd_drag_source(drag_id, payload, |ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), row_height),
-                        egui::Layout::left_to_right(Align::Center),
-                        |ui| {
-                            task_status_button(
-                                ui,
-                                id_salt,
-                                task,
-                                statuses,
-                                status_groups,
-                                palette,
-                                &mut action,
-                            );
-                            ui.add_space(6.0);
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    regular_text(task_context_line(task, lists, projects))
-                                        .size(if density == TaskListDensity::Compact {
-                                            10.0
-                                        } else {
-                                            11.0
-                                        })
-                                        .color(palette.muted),
-                                );
-                                inline_task_title(
-                                    ui,
-                                    id_salt,
-                                    task,
-                                    palette,
-                                    inline_task_edit,
-                                    &mut action,
-                                );
-                                if density == TaskListDensity::Normal {
-                                    task_meta_row(
-                                        ui,
-                                        id_salt,
-                                        task,
-                                        palette,
-                                        timezone,
-                                        inline_task_edit,
-                                        &mut action,
-                                    );
-                                }
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                let confirming = confirming_delete_task_id == Some(&task.id);
-                                if confirming {
-                                    if subtle_icon_button(ui, ICON_CHECK, "Confirm delete", palette)
-                                        .clicked()
-                                    {
-                                        action = Some(TaskAction::ConfirmDelete(task.id.clone()));
-                                    }
-                                    if subtle_icon_button(ui, ICON_CLOSE, "Cancel delete", palette)
-                                        .clicked()
-                                    {
-                                        action = Some(TaskAction::CancelDelete);
-                                    }
-                                    ui.label(regular_text("Delete?").color(palette.warning));
-                                } else if subtle_icon_button(ui, ICON_DELETE, "Delete", palette)
-                                    .clicked()
-                                {
-                                    action = Some(TaskAction::RequestDelete(task.id.clone()));
-                                }
-                                if density == TaskListDensity::Compact {
-                                    ui.add_space(8.0);
-                                    task_meta_row(
-                                        ui,
-                                        id_salt,
-                                        task,
-                                        palette,
-                                        timezone,
-                                        inline_task_edit,
-                                        &mut action,
-                                    );
-                                }
-                            });
-                        },
-                    );
-                })
-                .response
-                .on_hover_cursor(egui::CursorIcon::Grab);
-            if response.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            }
-            if index + 1 < tasks.len() {
-                ui.separator();
-            }
-        }
-    });
-    action
-}
-
-fn task_meta_row(
-    ui: &mut egui::Ui,
-    id_salt: &'static str,
-    task: &Task,
-    palette: Palette,
-    timezone: UtcOffset,
-    inline_task_edit: &mut Option<TaskInlineEdit>,
-    action: &mut Option<TaskAction>,
-) {
-    ui.horizontal(|ui| {
-        inline_task_meta(
-            ui,
-            id_salt,
-            task,
-            TaskInlineField::DueDate,
-            task.due_date
-                .map(|date| format!("due {date}"))
-                .unwrap_or_else(|| "due none".to_string()),
-            task.due_date
-                .map(|date| date.to_string())
-                .unwrap_or_default(),
-            92.0,
-            palette.due,
-            palette,
-            timezone,
-            inline_task_edit,
-            action,
-        );
-        inline_task_meta(
-            ui,
-            id_salt,
-            task,
-            TaskInlineField::EstimateMinutes,
-            task.estimated_minutes
-                .map(|minutes| format!("{minutes} min"))
-                .unwrap_or_else(|| "estimate none".to_string()),
-            task.estimated_minutes
-                .map(|minutes| minutes.to_string())
-                .unwrap_or_default(),
-            82.0,
-            palette.muted,
-            palette,
-            timezone,
-            inline_task_edit,
-            action,
-        );
-    });
-}
-
-fn done_task_section(
-    ui: &mut egui::Ui,
-    done_tasks: &[Task],
-    statuses: &[Status],
-    status_groups: &[StatusGroup],
-    lists: &[List],
-    projects: &[Project],
-    show_done_tasks: &mut bool,
-    done_task_limit: &mut usize,
-    density: TaskListDensity,
-    palette: Palette,
-) -> Option<TaskAction> {
-    if done_tasks.is_empty() {
-        return None;
-    }
-
-    let mut action = None;
-    if *show_done_tasks {
-        ui.add_space(8.0);
-        ui.separator();
-    } else {
-        ui.add_space(2.0);
-    }
-    ui.horizontal(|ui| {
-        let icon = if *show_done_tasks {
-            ICON_EXPAND_MORE
-        } else {
-            ICON_CHEVRON_RIGHT
-        };
-        if subtle_icon_button(ui, icon, "Toggle done tasks", palette).clicked() {
-            *show_done_tasks = !*show_done_tasks;
-        }
-        let response = ui.add(
-            egui::Label::new(
-                bold_text(format!("Done ({})", done_tasks.len())).color(palette.muted),
-            )
-            .sense(egui::Sense::click()),
-        );
-        if response.clicked() {
-            *show_done_tasks = !*show_done_tasks;
-        }
-    });
-    if !*show_done_tasks {
-        return None;
-    }
-
-    ui.add_space(4.0);
-    let visible_count = (*done_task_limit).min(done_tasks.len());
-    for (index, task) in done_tasks.iter().take(visible_count).enumerate() {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), density.row_height().min(56.0)),
-            egui::Layout::left_to_right(Align::Center),
-            |ui| {
-                task_status_button(
-                    ui,
-                    "done_tasks",
-                    task,
-                    statuses,
-                    status_groups,
-                    palette,
-                    &mut action,
-                );
-                ui.add_space(6.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        regular_text(task_context_line(task, lists, projects))
-                            .size(if density == TaskListDensity::Compact {
-                                10.0
-                            } else {
-                                11.0
-                            })
-                            .color(palette.muted),
-                    );
-                    ui.label(
-                        regular_text(task.title.as_str())
-                            .size(13.0)
-                            .color(palette.text),
-                    );
-                });
-            },
-        );
-        if index + 1 < visible_count {
-            ui.separator();
-        }
-    }
-
-    if visible_count < done_tasks.len() && ui.button("Load more done").clicked() {
-        *done_task_limit = (*done_task_limit + 10).min(done_tasks.len());
-    }
-
-    action
-}
-
 fn task_status_button(
     ui: &mut egui::Ui,
     id_salt: &'static str,
@@ -4650,7 +3146,6 @@ fn task_status_button(
         .and_then(|status| status_group_kind(status, status_groups))
         .unwrap_or(StatusGroupKind::NotStarted);
     let candidates = status_candidates(statuses, task.project_id.as_ref());
-    let status_color = task_status_color(&current_kind, palette);
 
     let button_id = ui.make_persistent_id((id_salt, "status_button", task.id.clone()));
     let popup_id = button_id.with("popup");
@@ -4661,27 +3156,52 @@ fn task_status_button(
             .unwrap_or("Status"),
     );
 
-    let center = rect.center();
-    let outer_radius = if response.hovered() { 9.5 } else { 8.5 };
-    ui.painter().circle_stroke(
-        center,
-        outer_radius,
-        Stroke::new(
-            if response.hovered() { 1.8_f32 } else { 1.3_f32 },
-            status_color,
-        ),
-    );
-    ui.painter().circle_filled(center, 3.8, status_color);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "ステータスを変更")
+    });
+    paint_status_icon(ui.painter(), rect.center(), &current_kind, palette);
 
-    egui::Popup::menu(&response)
+    components::popup(&response)
         .id(popup_id)
-        .width(160.0)
+        .width(190.0)
         .show(|ui| {
+            ui.set_min_width(190.0);
             for status in candidates {
-                if ui
-                    .selectable_label(status.id == task.status_id, status.name.as_str())
-                    .clicked()
-                {
+                let (rect, item) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 30.0),
+                    egui::Sense::click(),
+                );
+                if item.hovered() || status.id == task.status_id {
+                    ui.painter().rect_filled(rect, 4.0, palette.selected_fill);
+                }
+                let kind =
+                    status_group_kind(status, status_groups).unwrap_or(StatusGroupKind::NotStarted);
+                paint_status_icon(
+                    ui.painter(),
+                    rect.left_center() + egui::vec2(15.0, 0.0),
+                    &kind,
+                    palette,
+                );
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(34.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &status.name,
+                    egui::FontId::proportional(13.0),
+                    palette.text,
+                );
+                if status.id == task.status_id {
+                    ui.painter().text(
+                        rect.right_center() - egui::vec2(14.0, 0.0),
+                        egui::Align2::CENTER_CENTER,
+                        ICON_CHECK,
+                        material_icon_font(15.0),
+                        palette.text,
+                    );
+                }
+                item.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &status.name)
+                });
+                if item.clicked() {
                     *action = Some(TaskAction::SetStatus(task.id.clone(), status.id.clone()));
                     egui::Popup::close_id(ui.ctx(), popup_id);
                 }
@@ -4689,279 +3209,45 @@ fn task_status_button(
         });
 }
 
-fn inline_task_title(
-    ui: &mut egui::Ui,
-    id_salt: &'static str,
-    task: &Task,
+fn paint_status_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    kind: &StatusGroupKind,
     palette: Palette,
-    inline_task_edit: &mut Option<TaskInlineEdit>,
-    action: &mut Option<TaskAction>,
 ) {
-    let is_editing = inline_task_edit
-        .as_ref()
-        .is_some_and(|edit| edit.task_id == task.id && edit.field == TaskInlineField::Title);
-
-    if is_editing {
-        let Some(edit) = inline_task_edit.as_mut() else {
-            return;
-        };
-        let response = ui.add_sized(
-            [ui.available_width().clamp(160.0, 420.0), 22.0],
-            inline_text_field(&mut edit.value, 420.0).id(ui.make_persistent_id((
-                id_salt,
-                "inline_title",
-                task.id.clone(),
-            ))),
+    let color = task_status_color(kind, palette);
+    let radius = 8.5;
+    let stroke = Stroke::new(1.4_f32, color);
+    if *kind == StatusGroupKind::NotStarted {
+        for segment in 0..9 {
+            let points = (0..=4)
+                .map(|step| {
+                    let angle = (segment as f32 + step as f32 / 6.0) * std::f32::consts::TAU / 9.0;
+                    center + egui::vec2(angle.cos(), angle.sin()) * radius
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, stroke));
+        }
+    } else if *kind == StatusGroupKind::Done {
+        painter.circle_filled(center, radius, color);
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            ICON_CHECK,
+            material_icon_font(14.0),
+            Color32::WHITE,
         );
-        if edit.focus {
-            response.request_focus();
-            edit.focus = false;
-        }
-
-        let enter = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let escape = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
-        if escape {
-            *action = Some(TaskAction::CancelInlineEdit);
-        } else if enter || response.lost_focus() {
-            *action = Some(TaskAction::SaveInlineField(
-                task.id.clone(),
-                TaskInlineField::Title,
-                edit.value.clone(),
-            ));
-        }
     } else {
-        let response = ui
-            .add(
-                egui::Label::new(bold_text(task.title.as_str()).color(palette.text))
-                    .sense(egui::Sense::click()),
-            )
-            .on_hover_text("Double-click to edit");
-        if response.double_clicked() {
-            *inline_task_edit = Some(TaskInlineEdit {
-                task_id: task.id.clone(),
-                field: TaskInlineField::Title,
-                value: task.title.clone(),
-                focus: true,
-            });
-        }
-    }
-}
-
-fn inline_task_meta(
-    ui: &mut egui::Ui,
-    id_salt: &'static str,
-    task: &Task,
-    field: TaskInlineField,
-    display_text: String,
-    edit_value: String,
-    width: f32,
-    color: Color32,
-    palette: Palette,
-    timezone: UtcOffset,
-    inline_task_edit: &mut Option<TaskInlineEdit>,
-    action: &mut Option<TaskAction>,
-) {
-    let is_editing = inline_task_edit
-        .as_ref()
-        .is_some_and(|edit| edit.task_id == task.id && edit.field == field);
-
-    if is_editing {
-        let Some(edit) = inline_task_edit.as_mut() else {
-            return;
-        };
-        ui.vertical(|ui| {
-            let response = ui.add_sized(
-                [width, 20.0],
-                inline_text_field(&mut edit.value, width).id(ui.make_persistent_id((
-                    id_salt,
-                    "inline",
-                    task.id.clone(),
-                    field,
-                ))),
+        painter.circle_stroke(center, radius, stroke);
+        if *kind == StatusGroupKind::InProgress {
+            painter.circle_filled(center, 6.0, color);
+        } else {
+            painter.line_segment(
+                [center - egui::vec2(3.0, 0.0), center + egui::vec2(3.0, 0.0)],
+                stroke,
             );
-            if edit.focus {
-                response.request_focus();
-                edit.focus = false;
-            }
-
-            let selected = inline_task_meta_popup(
-                ui,
-                &response,
-                id_salt,
-                task,
-                field,
-                &mut edit.value,
-                action,
-                palette,
-                timezone,
-            );
-
-            let enter =
-                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let escape =
-                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape));
-            if escape {
-                *action = Some(TaskAction::CancelInlineEdit);
-            } else if !selected && (enter || response.lost_focus()) {
-                *action = Some(TaskAction::SaveInlineField(
-                    task.id.clone(),
-                    field,
-                    edit.value.clone(),
-                ));
-            }
-        });
-    } else {
-        let response = ui
-            .add(
-                egui::Label::new(regular_text(display_text).size(12.0).color(color))
-                    .sense(egui::Sense::click()),
-            )
-            .on_hover_text("Click to edit");
-        if response.clicked() {
-            *inline_task_edit = Some(TaskInlineEdit {
-                task_id: task.id.clone(),
-                field,
-                value: edit_value,
-                focus: true,
-            });
         }
     }
-}
-
-fn inline_task_meta_popup(
-    ui: &mut egui::Ui,
-    response: &egui::Response,
-    id_salt: &'static str,
-    task: &Task,
-    field: TaskInlineField,
-    value: &mut String,
-    action: &mut Option<TaskAction>,
-    palette: Palette,
-    timezone: UtcOffset,
-) -> bool {
-    let popup_id = ui.make_persistent_id((id_salt, "inline_meta_popup", task.id.clone(), field));
-    let mut selected = false;
-    let popup_width = match field {
-        TaskInlineField::DueDate => 260.0,
-        TaskInlineField::EstimateMinutes => 200.0,
-        TaskInlineField::Title => 0.0,
-    };
-    if popup_width <= 0.0 {
-        return false;
-    }
-
-    egui::Popup::from_response(response)
-        .id(popup_id)
-        .open(true)
-        .align(egui::RectAlign::BOTTOM_START)
-        .gap(4.0)
-        .width(popup_width)
-        .layout(egui::Layout::top_down(Align::Min))
-        .frame(
-            egui::Frame::popup(ui.style())
-                .fill(palette.surface)
-                .stroke(Stroke::new(1.0_f32, palette.border)),
-        )
-        .show(|ui| {
-            selected = match field {
-                TaskInlineField::DueDate => {
-                    due_date_inline_options(ui, task, value, action, palette, timezone)
-                }
-                TaskInlineField::EstimateMinutes => {
-                    estimate_inline_options(ui, task, value, action, palette)
-                }
-                TaskInlineField::Title => false,
-            };
-        });
-
-    selected
-}
-
-fn due_date_inline_options(
-    ui: &mut egui::Ui,
-    task: &Task,
-    value: &mut String,
-    action: &mut Option<TaskAction>,
-    palette: Palette,
-    timezone: UtcOffset,
-) -> bool {
-    if is_textual_date_query(value) {
-        ui.label(regular_text("Suggestions").size(10.0).color(palette.muted));
-    } else {
-        ui.label(
-            regular_text("Date selector")
-                .size(10.0)
-                .color(palette.muted),
-        );
-    }
-    let candidates = due_date_candidates(value, timezone);
-    let mut selected = false;
-    for row in candidates.chunks(3) {
-        ui.horizontal(|ui| {
-            for candidate in row {
-                if inline_choice(ui, candidate.label.as_str(), palette).clicked() {
-                    *value = candidate.value.clone();
-                    *action = Some(TaskAction::SaveInlineField(
-                        task.id.clone(),
-                        TaskInlineField::DueDate,
-                        value.clone(),
-                    ));
-                    selected = true;
-                }
-            }
-        });
-    }
-    selected
-}
-
-fn estimate_inline_options(
-    ui: &mut egui::Ui,
-    task: &Task,
-    value: &mut String,
-    action: &mut Option<TaskAction>,
-    palette: Palette,
-) -> bool {
-    let mut selected = false;
-    ui.horizontal(|ui| {
-        for (label, minutes) in [("30m", 30_u32), ("1h", 60), ("2h", 120)] {
-            if inline_choice(ui, label, palette).clicked() {
-                *value = minutes.to_string();
-                *action = Some(TaskAction::SaveInlineField(
-                    task.id.clone(),
-                    TaskInlineField::EstimateMinutes,
-                    value.clone(),
-                ));
-                selected = true;
-            }
-        }
-    });
-    ui.horizontal(|ui| {
-        let base = parse_optional_u32(value)
-            .ok()
-            .flatten()
-            .or(task.estimated_minutes)
-            .unwrap_or(0);
-        for (label, minutes) in [("+10m", 10_u32), ("+30m", 30), ("+1h", 60)] {
-            if inline_choice(ui, label, palette).clicked() {
-                *value = base.saturating_add(minutes).to_string();
-                *action = Some(TaskAction::SaveInlineField(
-                    task.id.clone(),
-                    TaskInlineField::EstimateMinutes,
-                    value.clone(),
-                ));
-                selected = true;
-            }
-        }
-    });
-    selected
-}
-
-fn inline_choice(ui: &mut egui::Ui, label: &str, palette: Palette) -> egui::Response {
-    ui.add(
-        egui::Label::new(regular_text(label).size(11.0).color(palette.accent))
-            .sense(egui::Sense::click()),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn status_candidates<'a>(
@@ -5049,344 +3335,6 @@ fn task_context_line(task: &Task, lists: &[List], projects: &[Project]) -> Strin
     }
 }
 
-fn subtle_icon_button(
-    ui: &mut egui::Ui,
-    icon: char,
-    hover_text: &'static str,
-    palette: Palette,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-    let color = if response.hovered() {
-        palette.text
-    } else {
-        Color32::from_rgba_unmultiplied(
-            palette.muted.r(),
-            palette.muted.g(),
-            palette.muted.b(),
-            150,
-        )
-    };
-    if response.hovered() {
-        ui.painter()
-            .circle_filled(rect.center(), 13.0, palette.faint);
-    }
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon.to_string(),
-        material_icon_font(18.0),
-        color,
-    );
-    response.on_hover_text(hover_text)
-}
-
-fn home_agenda_view(
-    ui: &mut egui::Ui,
-    target_date: Date,
-    auto_preview: Option<&AutoSchedulePreview>,
-    plan: Option<&PlanTodayResult>,
-    plan_source: ScheduleBlockSource,
-    schedule: &[ScheduleBlock],
-    scroll_to_now: bool,
-    timezone: UtcOffset,
-    palette: Palette,
-) -> HomeAgendaOutput {
-    let auto_blocks = auto_preview
-        .map(|preview| {
-            preview
-                .output
-                .blocks
-                .iter()
-                .filter(|block| block.window.start.to_offset(timezone).date() == target_date)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let proposed_blocks = plan
-        .filter(|plan| plan.target_date == target_date)
-        .map(|plan| plan.output.blocks.as_slice());
-    let mut output = HomeAgendaOutput::default();
-
-    if let Some(preview) = auto_preview {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                regular_text(format!("{} proposed", preview.output.blocks.len()))
-                    .color(palette.muted),
-            );
-            ui.label(
-                regular_text(format!("{} changes", preview.diff.changed_count()))
-                    .color(palette.accent),
-            );
-            if !preview.output.unscheduled.is_empty() {
-                ui.label(
-                    regular_text(format!("{} unscheduled", preview.output.unscheduled.len()))
-                        .color(palette.warning),
-                );
-            }
-            ui.label(
-                regular_text(format!(
-                    "fingerprint {}",
-                    &preview.diff.fingerprint[..preview.diff.fingerprint.len().min(10)]
-                ))
-                .size(11.0)
-                .color(palette.muted),
-            );
-        });
-        for issue in &preview.output.issues {
-            ui.label(
-                regular_text(item_issue_label(issue))
-                    .size(12.0)
-                    .color(palette.warning),
-            );
-        }
-        ui.add_space(6.0);
-    }
-
-    if auto_preview.is_none()
-        && let Some(plan) = plan.filter(|plan| plan.target_date == target_date)
-    {
-        ui.horizontal(|ui| {
-            ui.label(
-                regular_text(format!("{} proposed", plan.output.blocks.len())).color(palette.muted),
-            );
-            if !plan.output.unscheduled.is_empty() {
-                ui.label(
-                    regular_text(format!("{} unscheduled", plan.output.unscheduled.len()))
-                        .color(palette.warning),
-                );
-            }
-            if !plan.output.issues.is_empty() {
-                ui.label(
-                    regular_text(format!("{} issues", plan.output.issues.len()))
-                        .color(palette.warning),
-                );
-            }
-        });
-        if !plan.output.issues.is_empty() {
-            ui.vertical(|ui| {
-                for issue in &plan.output.issues {
-                    ui.label(
-                        regular_text(format!("Issue: {}", schedule_issue_label(issue)))
-                            .size(12.0)
-                            .color(palette.warning),
-                    );
-                }
-            });
-        }
-        ui.add_space(6.0);
-    }
-
-    ScrollArea::vertical()
-        .id_salt("home_agenda")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let day_start = match target_date.with_hms(0, 0, 0) {
-                Ok(value) => value.assume_offset(timezone),
-                Err(_) => return,
-            };
-            let day_end = day_start + time::Duration::days(1);
-            let total_minutes = (day_end - day_start).whole_minutes() as f32;
-            let width = ui.available_width().max(420.0);
-            let height = 24.0 * 72.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-            let painter = ui.painter_at(rect);
-            painter.rect(
-                rect,
-                8.0,
-                palette.surface,
-                Stroke::new(1.0_f32, palette.border),
-                egui::StrokeKind::Inside,
-            );
-
-            draw_agenda_hour_grid(
-                &painter,
-                rect,
-                target_date,
-                day_start,
-                total_minutes,
-                timezone,
-                palette,
-            );
-
-            if schedule.is_empty() {
-                if !auto_blocks.is_empty() {
-                    for block in &auto_blocks {
-                        draw_proposed_agenda_window(
-                            &painter,
-                            rect,
-                            day_start,
-                            total_minutes,
-                            block.window,
-                            &block.title,
-                            block.required_minutes,
-                            &ScheduleBlockSource::Scheduler,
-                            timezone,
-                            palette,
-                        );
-                    }
-                } else if let Some(blocks) = proposed_blocks {
-                    for block in blocks {
-                        draw_proposed_agenda_block(
-                            &painter,
-                            rect,
-                            day_start,
-                            total_minutes,
-                            block,
-                            &plan_source,
-                            timezone,
-                            palette,
-                        );
-                    }
-                }
-            } else {
-                for block in schedule {
-                    draw_draggable_schedule_block(
-                        ui,
-                        &painter,
-                        rect,
-                        day_start,
-                        total_minutes,
-                        block,
-                        timezone,
-                        palette,
-                    );
-                }
-            }
-
-            let pointer_in_agenda = ui
-                .ctx()
-                .pointer_interact_pos()
-                .filter(|pointer| rect.contains(*pointer));
-            let task_drop_payload = if pointer_in_agenda.is_some() {
-                egui::DragAndDrop::payload::<TaskDragPayload>(ui.ctx())
-            } else {
-                None
-            };
-            let block_drop_payload = if pointer_in_agenda.is_some() {
-                egui::DragAndDrop::payload::<ScheduleBlockDragPayload>(ui.ctx())
-            } else {
-                None
-            };
-            if task_drop_payload.is_some() || block_drop_payload.is_some() {
-                painter.rect(
-                    rect.shrink(2.0),
-                    8.0,
-                    Color32::TRANSPARENT,
-                    Stroke::new(
-                        2.0_f32,
-                        if block_drop_payload.is_some() {
-                            palette.success
-                        } else {
-                            palette.accent
-                        },
-                    ),
-                    egui::StrokeKind::Inside,
-                );
-            }
-
-            if ui.input(|input| input.pointer.any_released()) {
-                if task_drop_payload.is_some() {
-                    if let Some(payload) =
-                        egui::DragAndDrop::take_payload::<TaskDragPayload>(ui.ctx())
-                        && let Some(pointer) = pointer_in_agenda
-                    {
-                        let duration_minutes = payload.estimated_minutes.unwrap_or(30).max(1);
-                        let start_at = agenda_time_from_y_for_duration(
-                            pointer.y,
-                            rect,
-                            day_start,
-                            total_minutes,
-                            i64::from(duration_minutes),
-                        );
-                        output.manual_schedule = Some(ManualScheduleRequest {
-                            task_id: payload.task_id.clone(),
-                            title: payload.title.clone(),
-                            start_at,
-                            duration_minutes,
-                        });
-                    }
-                } else if block_drop_payload.is_some()
-                    && let Some(payload) =
-                        egui::DragAndDrop::take_payload::<ScheduleBlockDragPayload>(ui.ctx())
-                    && let Some(pointer) = pointer_in_agenda
-                {
-                    let start_y = pointer.y
-                        - agenda_pixels_for_minutes(
-                            payload.grab_offset_minutes,
-                            rect,
-                            total_minutes,
-                        );
-                    let start_at = agenda_time_from_y_for_duration(
-                        start_y,
-                        rect,
-                        day_start,
-                        total_minutes,
-                        payload.duration_minutes,
-                    );
-                    output.move_schedule = Some(MoveScheduleBlockRequest {
-                        block_id: payload.block_id.clone(),
-                        title: payload.title.clone(),
-                        start_at,
-                        duration_minutes: payload.duration_minutes.max(1),
-                    });
-                }
-            }
-
-            if draw_current_time_repair(
-                ui,
-                &painter,
-                rect,
-                target_date,
-                day_start,
-                total_minutes,
-                scroll_to_now,
-                timezone,
-                palette,
-            ) {
-                output.repair_clicked = true;
-            }
-        });
-
-    output
-}
-
-fn draw_agenda_hour_grid(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    target_date: Date,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    let label_width = 58.0;
-    let content_left = rect.left() + label_width;
-    let content_right = rect.right() - 10.0;
-    let pixels_per_minute = rect.height() / total_minutes;
-
-    for hour in 0..=24 {
-        let mark = if hour == 24 {
-            day_start + time::Duration::days(1)
-        } else {
-            match target_date.with_hms(hour, 0, 0) {
-                Ok(value) => value.assume_offset(timezone),
-                Err(_) => continue,
-            }
-        };
-        let y = rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
-        painter.text(
-            egui::pos2(rect.left() + 10.0, y),
-            egui::Align2::LEFT_CENTER,
-            format!("{hour:02}:00"),
-            egui::FontId::proportional(12.0),
-            palette.muted,
-        );
-        painter.line_segment(
-            [egui::pos2(content_left, y), egui::pos2(content_right, y)],
-            Stroke::new(1.0_f32, palette.faint),
-        );
-    }
-}
-
 fn agenda_time_from_y_for_duration(
     y: f32,
     rect: egui::Rect,
@@ -5405,144 +3353,6 @@ fn agenda_time_from_y_for_duration(
 
 fn agenda_pixels_for_minutes(minutes: i64, rect: egui::Rect, total_minutes: f32) -> f32 {
     minutes.max(0) as f32 * rect.height() / total_minutes
-}
-
-fn draw_proposed_agenda_block(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    block: &ProposedScheduleBlock,
-    source: &ScheduleBlockSource,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    draw_proposed_agenda_window(
-        painter,
-        rect,
-        day_start,
-        total_minutes,
-        block.window,
-        &block.title,
-        block.required_minutes,
-        source,
-        timezone,
-        palette,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_proposed_agenda_window(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    window: mnema_app::TimeWindow,
-    title: &str,
-    required_minutes: u32,
-    source: &ScheduleBlockSource,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    let label_width = 58.0;
-    let left = rect.left() + label_width + 10.0;
-    let right = rect.right() - 12.0;
-    let pixels_per_minute = rect.height() / total_minutes;
-    let start_minutes = (window.start - day_start).whole_minutes() as f32;
-    let end_minutes = (window.end - day_start).whole_minutes() as f32;
-    let top = rect
-        .top()
-        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
-    let bottom = rect
-        .bottom()
-        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
-    if bottom <= top {
-        return;
-    }
-
-    let block_rect = egui::Rect::from_min_max(
-        egui::pos2(left, top),
-        egui::pos2(right, bottom.max(top + 30.0)),
-    );
-    let (fill, stroke, text_color) = proposed_block_colors(source, palette);
-    painter.rect(
-        block_rect,
-        6.0,
-        fill,
-        Stroke::new(1.0_f32, stroke),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        block_rect.left_top() + egui::vec2(10.0, 8.0),
-        egui::Align2::LEFT_TOP,
-        format!(
-            "{}-{}  {}  {}m",
-            format_hm_in(window.start, timezone),
-            format_hm_in(window.end, timezone),
-            title,
-            required_minutes
-        ),
-        egui::FontId::proportional(13.0),
-        text_color,
-    );
-}
-
-fn draw_current_time_repair(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    target_date: Date,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    scroll_to_now: bool,
-    timezone: UtcOffset,
-    palette: Palette,
-) -> bool {
-    let now = OffsetDateTime::now_utc().to_offset(timezone);
-    if now.date() != target_date {
-        return false;
-    }
-
-    let label_width = 58.0;
-    let content_left = rect.left() + label_width;
-    let icon_center_x = rect.right() - 24.0;
-    let y =
-        rect.top() + ((now - day_start).whole_minutes() as f32 * (rect.height() / total_minutes));
-    if y < rect.top() || y > rect.bottom() {
-        return false;
-    }
-
-    painter.line_segment(
-        [
-            egui::pos2(content_left, y),
-            egui::pos2(icon_center_x - 14.0, y),
-        ],
-        Stroke::new(1.5_f32, palette.warning),
-    );
-
-    let icon_rect =
-        egui::Rect::from_center_size(egui::pos2(icon_center_x, y), egui::vec2(34.0, 34.0));
-    let response = ui
-        .interact(
-            icon_rect,
-            ui.make_persistent_id("home_repair_now"),
-            egui::Sense::click(),
-        )
-        .on_hover_text("Repair?");
-    if scroll_to_now {
-        ui.scroll_to_rect(icon_rect, Some(Align::Center));
-    }
-    let radius = if response.hovered() { 13.0 } else { 9.0 };
-    painter.circle_filled(icon_rect.center(), radius, palette.warning);
-    painter.text(
-        icon_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        ICON_AUTORENEW.to_string(),
-        material_icon_font(if response.hovered() { 20.0 } else { 16.0 }),
-        palette.surface,
-    );
-
-    response.clicked()
 }
 
 fn project_gantt_view(
@@ -5844,799 +3654,16 @@ fn gantt_x_for_date(rect: egui::Rect, range_start: Date, range_end: Date, date: 
     rect.left() + rect.width() * (day_index / total_days)
 }
 
-fn schedule_calendar_view(
-    ui: &mut egui::Ui,
-    target_date: Date,
-    blocks: &[ScheduleBlock],
-    timezone: UtcOffset,
-    palette: Palette,
-) -> ScheduleDayOutput {
-    let mut output = ScheduleDayOutput::default();
-    ui.horizontal_top(|ui| {
-        output.move_schedule = schedule_timeline(ui, target_date, blocks, timezone, palette);
-        ui.add_space(12.0);
-        output.action = schedule_action_panel(ui, blocks, timezone, palette);
-    });
-    output
-}
-
-fn schedule_month_calendar(
-    ui: &mut egui::Ui,
-    target_date: Date,
-    blocks: &[ScheduleBlock],
-    timezone: UtcOffset,
-    palette: Palette,
-) -> Option<Date> {
-    let first_day = match first_day_of_month(target_date) {
-        Ok(first_day) => first_day,
-        Err(error) => {
-            ui.colored_label(palette.error, error.to_string());
-            return None;
-        }
-    };
-
-    let mut selected_date = None;
-    ui.horizontal(|ui| {
-        ui.label(bold_text(format!(
-            "{} {}",
-            month_label(target_date.month()),
-            target_date.year()
-        )));
-        ui.label(regular_text(format!("{} blocks", blocks.len())).color(palette.muted));
-    });
-    ui.add_space(8.0);
-
-    let mut weeks = Vec::with_capacity(6);
-    let mut cell_date = calendar_grid_start(first_day);
-    for _ in 0..6 {
-        let mut week = Vec::with_capacity(7);
-        for _ in 0..7 {
-            week.push(cell_date);
-            cell_date = cell_date.next_day().unwrap_or(cell_date);
-        }
-        weeks.push(week);
-    }
-
-    let cell_width = (ui.available_width() / 7.0).clamp(72.0, 168.0);
-    let header_height = 30.0;
-    let row_heights = weeks
-        .iter()
-        .map(|week| calendar_week_row_height(week, blocks, timezone))
-        .collect::<Vec<_>>();
-    let table_height = header_height + row_heights.iter().sum::<f32>();
-    let table_size = egui::vec2(cell_width * 7.0, table_height);
-    let max_height = ui.available_height().max(1.0);
-
-    ScrollArea::both()
-        .id_salt("schedule_month_calendar_table")
-        .auto_shrink([false, false])
-        .max_height(max_height)
-        .show(ui, |ui| {
-            let (table_rect, _) = ui.allocate_exact_size(table_size, egui::Sense::hover());
-            let painter = ui.painter_at(table_rect);
-            painter.rect_filled(table_rect, 0.0, palette.surface);
-            painter.rect_filled(
-                egui::Rect::from_min_size(
-                    table_rect.min,
-                    egui::vec2(table_rect.width(), header_height),
-                ),
-                0.0,
-                palette.faint,
-            );
-
-            for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                .iter()
-                .enumerate()
-            {
-                let x = table_rect.left() + cell_width * (index as f32 + 0.5);
-                painter.text(
-                    egui::pos2(x, table_rect.top() + header_height * 0.5),
-                    egui::Align2::CENTER_CENTER,
-                    *label,
-                    egui::FontId::proportional(12.0),
-                    palette.muted,
-                );
-            }
-
-            let mut selected_rect = None;
-            let mut row_top = table_rect.top() + header_height;
-            for (row, week) in weeks.iter().enumerate() {
-                let row_height = row_heights[row];
-                for (column, date) in week.iter().enumerate() {
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(table_rect.left() + cell_width * column as f32, row_top),
-                        egui::vec2(cell_width, row_height),
-                    );
-                    let response = ui.interact(
-                        rect,
-                        ui.make_persistent_id(("schedule_month_cell", date.to_string())),
-                        egui::Sense::click(),
-                    );
-                    let day_blocks = blocks
-                        .iter()
-                        .filter(|block| block.start_at.to_offset(timezone).date() == *date)
-                        .collect::<Vec<_>>();
-                    let in_month =
-                        date.month() == target_date.month() && date.year() == target_date.year();
-                    let selected = *date == target_date;
-                    draw_calendar_day_cell(
-                        &painter,
-                        rect,
-                        *date,
-                        &day_blocks,
-                        in_month,
-                        selected,
-                        response.hovered(),
-                        timezone,
-                        palette,
-                    );
-                    if selected {
-                        selected_rect = Some(rect);
-                    }
-                    if response.clicked() {
-                        selected_date = Some(*date);
-                    }
-                }
-                row_top += row_height;
-            }
-            draw_calendar_table_grid(
-                &painter,
-                table_rect,
-                cell_width,
-                header_height,
-                &row_heights,
-                palette,
-            );
-            if let Some(rect) = selected_rect {
-                painter.rect_stroke(
-                    rect.shrink(1.0),
-                    0.0,
-                    Stroke::new(2.0_f32, palette.accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
-        });
-
-    selected_date
-}
-
-fn calendar_week_row_height(week: &[Date], blocks: &[ScheduleBlock], timezone: UtcOffset) -> f32 {
-    let max_visible_lines = week
-        .iter()
-        .map(|date| {
-            let count = blocks
-                .iter()
-                .filter(|block| block.start_at.to_offset(timezone).date() == *date)
-                .count();
-            count.min(3) + usize::from(count > 3)
-        })
-        .max()
-        .unwrap_or(0);
-
-    if max_visible_lines == 0 {
-        58.0
-    } else {
-        (42.0 + max_visible_lines as f32 * 18.0).clamp(84.0, 122.0)
-    }
-}
-
-fn draw_calendar_table_grid(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    cell_width: f32,
-    header_height: f32,
-    row_heights: &[f32],
-    palette: Palette,
-) {
-    for column in 0..=7 {
-        let x = rect.left() + cell_width * column as f32;
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, palette.border),
-        );
-    }
-
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), rect.top()),
-            egui::pos2(rect.right(), rect.top()),
-        ],
-        Stroke::new(1.0_f32, palette.border),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), rect.top() + header_height),
-            egui::pos2(rect.right(), rect.top() + header_height),
-        ],
-        Stroke::new(1.0_f32, palette.border_strong),
-    );
-    let mut y = rect.top() + header_height;
-    for row_height in row_heights {
-        y += *row_height;
-        painter.line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            Stroke::new(1.0_f32, palette.border),
-        );
-    }
-}
-
-fn draw_calendar_day_cell(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    date: Date,
-    blocks: &[&ScheduleBlock],
-    in_month: bool,
-    selected: bool,
-    hovered: bool,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    let fill = if selected {
-        palette.selected_fill
-    } else if hovered {
-        palette.control_bg
-    } else if in_month {
-        palette.surface
-    } else {
-        palette.faint
-    };
-    painter.rect_filled(rect, 0.0, fill);
-
-    let text_color = if in_month {
-        palette.text
-    } else {
-        palette.muted
-    };
-    painter.text(
-        rect.left_top() + egui::vec2(8.0, 7.0),
-        egui::Align2::LEFT_TOP,
-        date.day().to_string(),
-        egui::FontId::proportional(13.0),
-        text_color,
-    );
-
-    if blocks.is_empty() {
-        return;
-    }
-
-    let total_minutes = blocks
-        .iter()
-        .map(|block| schedule_block_minutes(block))
-        .sum::<i64>();
-    painter.text(
-        rect.right_top() + egui::vec2(-8.0, 8.0),
-        egui::Align2::RIGHT_TOP,
-        format!("{}m", total_minutes),
-        egui::FontId::proportional(12.0),
-        palette.muted,
-    );
-
-    let mut y = rect.top() + 30.0;
-    for block in blocks.iter().take(3) {
-        let color = schedule_state_text_color(&block.state, palette);
-        let dot_rect =
-            egui::Rect::from_min_size(egui::pos2(rect.left() + 8.0, y + 4.0), egui::vec2(6.0, 6.0));
-        painter.rect_filled(dot_rect, 3.0, color);
-        let title = block
-            .title_snapshot
-            .as_deref()
-            .unwrap_or("(untitled block)");
-        painter.text(
-            egui::pos2(rect.left() + 20.0, y),
-            egui::Align2::LEFT_TOP,
-            truncate_chars(
-                &format!("{} {}", format_hm_in(block.start_at, timezone), title),
-                22,
-            ),
-            egui::FontId::proportional(12.0),
-            text_color,
-        );
-        y += 18.0;
-    }
-
-    if blocks.len() > 3 {
-        painter.text(
-            egui::pos2(rect.left() + 20.0, y),
-            egui::Align2::LEFT_TOP,
-            format!("+{} more", blocks.len() - 3),
-            egui::FontId::proportional(12.0),
-            palette.muted,
-        );
-    }
-}
-
-fn schedule_timeline(
-    ui: &mut egui::Ui,
-    target_date: Date,
-    blocks: &[ScheduleBlock],
-    timezone: UtcOffset,
-    palette: Palette,
-) -> Option<MoveScheduleBlockRequest> {
-    let Ok((day_start, day_end)) = schedule_bounds(target_date, blocks, timezone) else {
-        ui.colored_label(palette.error, "Invalid schedule bounds.");
-        return None;
-    };
-    let total_minutes = (day_end - day_start).whole_minutes().max(60) as f32;
-    let height = (total_minutes * 1.15).clamp(420.0, 960.0);
-    let width = (ui.available_width() - 260.0).clamp(420.0, 760.0);
-    let mut move_schedule = None;
-
-    ScrollArea::vertical()
-        .id_salt("schedule_timeline")
-        .max_height(560.0)
-        .show(ui, |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-            let painter = ui.painter_at(rect);
-            painter.rect(
-                rect,
-                8.0,
-                palette.surface,
-                Stroke::new(1.0_f32, palette.border),
-                egui::StrokeKind::Inside,
-            );
-
-            let label_width = 58.0;
-            let content_left = rect.left() + label_width;
-            let content_right = rect.right() - 10.0;
-            let pixels_per_minute = rect.height() / total_minutes;
-            let mut hour = day_start.hour();
-            let end_hour = day_end.hour();
-
-            while hour <= end_hour {
-                let Ok(mark) = target_date.with_hms(hour, 0, 0) else {
-                    break;
-                };
-                let mark = mark.assume_offset(timezone);
-                let y =
-                    rect.top() + ((mark - day_start).whole_minutes() as f32 * pixels_per_minute);
-                if rect.contains(egui::pos2(content_left, y)) {
-                    painter.text(
-                        egui::pos2(rect.left() + 10.0, y),
-                        egui::Align2::LEFT_CENTER,
-                        format!("{hour:02}:00"),
-                        egui::FontId::proportional(12.0),
-                        palette.muted,
-                    );
-                    painter.line_segment(
-                        [egui::pos2(content_left, y), egui::pos2(content_right, y)],
-                        Stroke::new(1.0_f32, palette.faint),
-                    );
-                }
-                hour += 1;
-            }
-
-            for block in blocks {
-                draw_draggable_schedule_block(
-                    ui,
-                    &painter,
-                    rect,
-                    day_start,
-                    total_minutes,
-                    block,
-                    timezone,
-                    palette,
-                );
-            }
-
-            let pointer_in_timeline = ui
-                .ctx()
-                .pointer_interact_pos()
-                .filter(|pointer| rect.contains(*pointer));
-            let block_drop_payload = if pointer_in_timeline.is_some() {
-                egui::DragAndDrop::payload::<ScheduleBlockDragPayload>(ui.ctx())
-            } else {
-                None
-            };
-            if block_drop_payload.is_some() {
-                painter.rect(
-                    rect.shrink(2.0),
-                    8.0,
-                    Color32::TRANSPARENT,
-                    Stroke::new(2.0_f32, palette.success),
-                    egui::StrokeKind::Inside,
-                );
-            }
-
-            if block_drop_payload.is_some()
-                && ui.input(|input| input.pointer.any_released())
-                && let Some(payload) =
-                    egui::DragAndDrop::take_payload::<ScheduleBlockDragPayload>(ui.ctx())
-                && let Some(pointer) = pointer_in_timeline
-            {
-                let start_y = pointer.y
-                    - agenda_pixels_for_minutes(payload.grab_offset_minutes, rect, total_minutes);
-                let start_at = agenda_time_from_y_for_duration(
-                    start_y,
-                    rect,
-                    day_start,
-                    total_minutes,
-                    payload.duration_minutes,
-                );
-                move_schedule = Some(MoveScheduleBlockRequest {
-                    block_id: payload.block_id.clone(),
-                    title: payload.title.clone(),
-                    start_at,
-                    duration_minutes: payload.duration_minutes.max(1),
-                });
-            }
-        });
-
-    move_schedule
-}
-
-fn schedule_window_rect(
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    start_at: OffsetDateTime,
-    end_at: OffsetDateTime,
-) -> Option<egui::Rect> {
-    let label_width = 58.0;
-    let left = rect.left() + label_width + 10.0;
-    let right = rect.right() - 12.0;
-    let pixels_per_minute = rect.height() / total_minutes;
-    let start_minutes = (start_at - day_start).whole_minutes() as f32;
-    let end_minutes = (end_at - day_start).whole_minutes() as f32;
-    let top = rect
-        .top()
-        .max(rect.top() + start_minutes * pixels_per_minute + 2.0);
-    let bottom = rect
-        .bottom()
-        .min(rect.top() + end_minutes * pixels_per_minute - 2.0);
-    if bottom <= top {
-        return None;
-    }
-
-    Some(egui::Rect::from_min_max(
-        egui::pos2(left, top),
-        egui::pos2(right, bottom.max(top + 30.0)),
-    ))
-}
-
-fn schedule_block_rect(
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    block: &ScheduleBlock,
-) -> Option<egui::Rect> {
-    schedule_window_rect(rect, day_start, total_minutes, block.start_at, block.end_at)
-}
-
-fn draw_draggable_schedule_block(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    block: &ScheduleBlock,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    draw_schedule_block(
-        painter,
-        rect,
-        day_start,
-        total_minutes,
-        block,
-        timezone,
-        palette,
-    );
-
-    let Some(block_rect) = schedule_block_rect(rect, day_start, total_minutes, block) else {
-        return;
-    };
-    let duration_minutes = schedule_block_minutes(block).max(1);
-    let pixels_per_minute = rect.height() / total_minutes;
-    let response = ui
-        .interact(
-            block_rect,
-            ui.make_persistent_id(("schedule_block_drag", block.id.clone())),
-            egui::Sense::drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Grab);
-    let grab_offset_minutes = schedule_block_grab_offset_minutes(
-        &response,
-        block_rect,
-        pixels_per_minute,
-        duration_minutes,
-    );
-    let title = block
-        .title_snapshot
-        .as_deref()
-        .unwrap_or("(untitled block)")
-        .to_string();
-    response.dnd_set_drag_payload(ScheduleBlockDragPayload {
-        block_id: block.id.clone(),
-        title: title.clone(),
-        duration_minutes,
-        grab_offset_minutes,
-    });
-
-    if response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            let start_y =
-                pointer.y - agenda_pixels_for_minutes(grab_offset_minutes, rect, total_minutes);
-            let start_at = agenda_time_from_y_for_duration(
-                start_y,
-                rect,
-                day_start,
-                total_minutes,
-                duration_minutes,
-            );
-            draw_schedule_move_preview(
-                painter,
-                rect,
-                day_start,
-                total_minutes,
-                start_at,
-                duration_minutes,
-                &title,
-                timezone,
-                palette,
-            );
-        }
-    }
-}
-
-fn draw_schedule_block(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    block: &ScheduleBlock,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    let Some(block_rect) = schedule_block_rect(rect, day_start, total_minutes, block) else {
-        return;
-    };
-
-    let (fill, stroke, text_color) = schedule_block_colors(block, palette);
-    painter.rect(
-        block_rect,
-        6.0,
-        fill,
-        Stroke::new(1.0_f32, stroke),
-        egui::StrokeKind::Inside,
-    );
-
-    let title = block
-        .title_snapshot
-        .as_deref()
-        .unwrap_or("(untitled block)");
-    let duration = schedule_block_minutes(block);
-    let label = format!(
-        "{}-{}  {}  {duration}m",
-        format_hm_in(block.start_at, timezone),
-        format_hm_in(block.end_at, timezone),
-        title
-    );
-    painter.text(
-        block_rect.left_top() + egui::vec2(10.0, 8.0),
-        egui::Align2::LEFT_TOP,
-        label,
-        egui::FontId::proportional(13.0),
-        text_color,
-    );
-}
-
-fn schedule_block_grab_offset_minutes(
-    response: &egui::Response,
-    block_rect: egui::Rect,
-    pixels_per_minute: f32,
-    duration_minutes: i64,
-) -> i64 {
-    let offset = response
-        .interact_pointer_pos()
-        .map(|position| {
-            let drag_origin_y = position.y - response.drag_delta().y;
-            ((drag_origin_y - block_rect.top()) / pixels_per_minute).round() as i64
-        })
-        .unwrap_or(0);
-    offset.clamp(0, duration_minutes.saturating_sub(1))
-}
-
-fn draw_schedule_move_preview(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    day_start: OffsetDateTime,
-    total_minutes: f32,
-    start_at: OffsetDateTime,
-    duration_minutes: i64,
-    title: &str,
-    timezone: UtcOffset,
-    palette: Palette,
-) {
-    let end_at = start_at + time::Duration::minutes(duration_minutes.max(1));
-    let Some(preview_rect) = schedule_window_rect(rect, day_start, total_minutes, start_at, end_at)
-    else {
-        return;
-    };
-    let fill = Color32::from_rgba_unmultiplied(
-        palette.success.r(),
-        palette.success.g(),
-        palette.success.b(),
-        54,
-    );
-    painter.rect(
-        preview_rect,
-        6.0,
-        fill,
-        Stroke::new(2.0_f32, palette.success),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        preview_rect.left_top() + egui::vec2(10.0, 8.0),
-        egui::Align2::LEFT_TOP,
-        format!(
-            "{}-{}  {}",
-            format_hm_in(start_at, timezone),
-            format_hm_in(end_at, timezone),
-            title
-        ),
-        egui::FontId::proportional(13.0),
-        palette.text,
-    );
-}
-
-fn schedule_action_panel(
-    ui: &mut egui::Ui,
-    blocks: &[ScheduleBlock],
-    timezone: UtcOffset,
-    palette: Palette,
-) -> Option<ScheduleAction> {
-    let mut action = None;
-    ui.allocate_ui_with_layout(
-        egui::vec2(260.0, 560.0),
-        egui::Layout::top_down(Align::Min),
-        |ui| {
-            ui.label(bold_text("Blocks").color(palette.section));
-            ui.add_space(6.0);
-            ScrollArea::vertical()
-                .id_salt("schedule_action_panel")
-                .show(ui, |ui| {
-                    for block in blocks {
-                        ui.group(|ui| {
-                            ui.label(bold_text(
-                                block
-                                    .title_snapshot
-                                    .as_deref()
-                                    .unwrap_or("(untitled block)"),
-                            ));
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!(
-                                    "{}-{}",
-                                    format_hm_in(block.start_at, timezone),
-                                    format_hm_in(block.end_at, timezone)
-                                ));
-                                ui.label(format!("{}m", schedule_block_minutes(block)));
-                            });
-                            ui.label(
-                                regular_text(schedule_state_label(&block.state))
-                                    .color(schedule_state_text_color(&block.state, palette)),
-                            );
-                            ui.horizontal(|ui| {
-                                if ui.button("Edit").clicked() {
-                                    action = Some(ScheduleAction::Edit(block.id.clone()));
-                                }
-                                if block.state == ScheduleBlockState::Proposed
-                                    && ui.button("Schedule").clicked()
-                                {
-                                    action = Some(ScheduleAction::SetState(
-                                        block.id.clone(),
-                                        ScheduleBlockState::Scheduled,
-                                    ));
-                                }
-                                if block.state != ScheduleBlockState::Done
-                                    && ui.button("Done").clicked()
-                                {
-                                    action = Some(ScheduleAction::SetState(
-                                        block.id.clone(),
-                                        ScheduleBlockState::Done,
-                                    ));
-                                }
-                                if block.state != ScheduleBlockState::Cancelled
-                                    && ui.button("Cancel").clicked()
-                                {
-                                    action = Some(ScheduleAction::SetState(
-                                        block.id.clone(),
-                                        ScheduleBlockState::Cancelled,
-                                    ));
-                                }
-                            });
-                        });
-                        ui.add_space(8.0);
-                    }
-                });
-        },
-    );
-    action
-}
-
-fn schedule_bounds(
-    target_date: Date,
-    blocks: &[ScheduleBlock],
-    timezone: UtcOffset,
-) -> Result<(OffsetDateTime, OffsetDateTime)> {
-    let mut start = target_date.with_hms(9, 0, 0)?.assume_offset(timezone);
-    let mut end = target_date.with_hms(17, 0, 0)?.assume_offset(timezone);
-    for block in blocks {
-        start = start.min(block.start_at);
-        end = end.max(block.end_at);
-    }
-    Ok((start, end))
-}
-
-fn schedule_block_colors(block: &ScheduleBlock, palette: Palette) -> (Color32, Color32, Color32) {
-    match block.state {
-        ScheduleBlockState::Proposed => proposed_block_colors(&block.source, palette),
-        ScheduleBlockState::Scheduled | ScheduleBlockState::Active => {
-            if block.source == ScheduleBlockSource::Manual {
-                (palette.control_bg, palette.success, palette.text)
-            } else if block.source == ScheduleBlockSource::Repair {
-                (palette.faint, palette.warning, palette.text)
-            } else {
-                (palette.control_bg, palette.accent, palette.text)
-            }
-        }
-        ScheduleBlockState::Done => (palette.faint, palette.success, palette.success),
-        ScheduleBlockState::Missed => (palette.faint, palette.warning, palette.warning),
-        ScheduleBlockState::Cancelled => (palette.faint, palette.border, palette.muted),
-    }
-}
-
-fn proposed_block_colors(
-    source: &ScheduleBlockSource,
-    palette: Palette,
-) -> (Color32, Color32, Color32) {
-    match source {
-        ScheduleBlockSource::Manual => (palette.control_bg, palette.success, palette.text),
-        ScheduleBlockSource::Repair => (palette.faint, palette.warning, palette.text),
-        ScheduleBlockSource::ExternalCalendar => {
-            (palette.faint, palette.border_strong, palette.text)
-        }
-        ScheduleBlockSource::Scheduler => (palette.selected_fill, palette.accent, palette.text),
-    }
-}
-
-fn schedule_state_text_color(state: &ScheduleBlockState, palette: Palette) -> Color32 {
-    match state {
-        ScheduleBlockState::Done => palette.success,
-        ScheduleBlockState::Missed => palette.warning,
-        ScheduleBlockState::Cancelled => palette.muted,
-        _ => palette.accent,
-    }
-}
-
-fn schedule_block_minutes(block: &ScheduleBlock) -> i64 {
-    (block.end_at - block.start_at).whole_minutes().max(0)
-}
-
-fn first_day_of_month(date: Date) -> Result<Date> {
-    Ok(Date::from_calendar_date(date.year(), date.month(), 1)?)
-}
-
-fn dates_in_month(date: Date) -> Result<Vec<Date>> {
-    let first_day = first_day_of_month(date)?;
-    let mut days = Vec::new();
-    let mut day = first_day;
-    while day.month() == first_day.month() && day.year() == first_day.year() {
-        days.push(day);
-        let Some(next_day) = day.next_day() else {
-            break;
-        };
-        day = next_day;
-    }
-    Ok(days)
-}
-
 fn calendar_grid_start(first_day: Date) -> Date {
     let mut date = first_day;
     for _ in 0..first_day.weekday().number_days_from_monday() {
         date = date.previous_day().unwrap_or(date);
     }
     date
+}
+
+fn first_day_of_month(date: Date) -> Result<Date> {
+    Ok(Date::from_calendar_date(date.year(), date.month(), 1)?)
 }
 
 fn add_months(date: Date, months: i32) -> Result<Date> {
@@ -6758,12 +3785,6 @@ async fn done_status_ids(
     Ok(status_ids)
 }
 
-#[derive(Debug, Clone)]
-struct DateCandidate {
-    label: String,
-    value: String,
-}
-
 fn parse_optional_date(value: &str) -> Result<Option<Date>> {
     parse_optional_date_with_today(value, OffsetDateTime::now_utc().date())
 }
@@ -6831,6 +3852,7 @@ fn parse_flexible_date(value: &str, today: Date) -> Result<Date> {
     ))
 }
 
+#[cfg(test)]
 fn parse_hm_for_date(value: &str, date: Date, timezone: UtcOffset) -> Result<OffsetDateTime> {
     let time = parse_hm_time(value)?;
     Ok(date.with_time(time).assume_offset(timezone))
@@ -6850,67 +3872,6 @@ fn validate_availability_window(start: &str, end: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn parse_optional_u32(value: &str) -> Result<Option<u32>> {
-    let value = value.trim();
-    if value.is_empty() {
-        Ok(None)
-    } else {
-        parse_duration_minutes(value)
-            .map(Some)
-            .ok_or_else(|| anyhow!("見積時間は 30m / 1h30m / 01:30 / 分数 などで入力してください"))
-    }
-}
-
-fn due_date_candidates(input: &str, timezone: UtcOffset) -> Vec<DateCandidate> {
-    let today = OffsetDateTime::now_utc().to_offset(timezone).date();
-    let query = input.trim().to_ascii_lowercase();
-    if is_textual_date_query(&query) {
-        let mut candidates = Vec::new();
-        let named = [
-            ("today", today),
-            ("tomorrow", today.next_day().unwrap_or(today)),
-        ];
-        for (label, date) in named {
-            if label.starts_with(&query) {
-                candidates.push(date_candidate(label, date));
-            }
-        }
-        for (label, weekday) in weekday_options() {
-            if label.starts_with(&query) {
-                candidates.push(date_candidate(label, next_weekday(today, weekday)));
-            }
-        }
-        return candidates.into_iter().take(6).collect();
-    }
-
-    let anchor = parse_flexible_date(&query, today).unwrap_or(today);
-    let start = add_days(anchor, -3).unwrap_or(anchor);
-    (0..7)
-        .filter_map(|offset| add_days(start, offset))
-        .map(|date| {
-            let label = if date == today {
-                "today"
-            } else if Some(date) == today.next_day() {
-                "tomorrow"
-            } else {
-                weekday_short_label(date.weekday())
-            };
-            date_candidate(label, date)
-        })
-        .collect()
-}
-
-fn is_textual_date_query(value: &str) -> bool {
-    value.trim().chars().any(|ch| ch.is_ascii_alphabetic())
-}
-
-fn date_candidate(label: &str, date: Date) -> DateCandidate {
-    DateCandidate {
-        label: format!("{label} {date}"),
-        value: date.to_string(),
-    }
 }
 
 fn parse_weekday(value: &str) -> Option<Weekday> {
@@ -6944,18 +3905,6 @@ fn next_weekday(today: Date, weekday: Weekday) -> Date {
     let target_index = weekday.number_days_from_monday() as i32;
     let offset = (target_index - today_index).rem_euclid(7);
     add_days(today, offset).unwrap_or(today)
-}
-
-fn weekday_short_label(weekday: Weekday) -> &'static str {
-    match weekday {
-        Weekday::Monday => "Mon",
-        Weekday::Tuesday => "Tue",
-        Weekday::Wednesday => "Wed",
-        Weekday::Thursday => "Thu",
-        Weekday::Friday => "Fri",
-        Weekday::Saturday => "Sat",
-        Weekday::Sunday => "Sun",
-    }
 }
 
 fn parse_duration_minutes(value: &str) -> Option<u32> {
@@ -7134,6 +4083,7 @@ fn asks_next_action(value: &str) -> bool {
         || value.contains("何する")
 }
 
+#[cfg(test)]
 fn workday_availability(
     date: Date,
     timezone: UtcOffset,
@@ -7195,41 +4145,6 @@ fn schedule_issue_label(issue: &ScheduleIssue) -> String {
     }
 }
 
-fn auto_preview_summary(ui: &mut egui::Ui, preview: &AutoSchedulePreview, palette: Palette) {
-    egui::Frame::new()
-        .fill(palette.surface)
-        .stroke(Stroke::new(1.0_f32, palette.border))
-        .corner_radius(8.0)
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(bold_text("Unsaved preview").color(palette.section));
-                ui.label(format!(
-                    "{} → {}",
-                    preview.request.start_date, preview.request.end_date_exclusive
-                ));
-                ui.label(format!("{} blocks", preview.output.blocks.len()));
-                ui.label(format!("{} changes", preview.diff.changed_count()));
-                ui.label(format!("{} unscheduled", preview.output.unscheduled.len()));
-                ui.label(
-                    regular_text(format!(
-                        "fingerprint {}",
-                        &preview.diff.fingerprint[..preview.diff.fingerprint.len().min(12)]
-                    ))
-                    .size(11.0)
-                    .color(palette.muted),
-                );
-            });
-            for issue in &preview.output.issues {
-                ui.label(
-                    regular_text(item_issue_label(issue))
-                        .size(12.0)
-                        .color(palette.warning),
-                );
-            }
-        });
-}
-
 fn habit_schedule_label(habit: &Habit) -> String {
     let schedule = match &habit.schedule {
         HabitSchedule::Daily => "Daily".to_string(),
@@ -7255,16 +4170,6 @@ fn day_of_week_label(day: &DayOfWeek) -> &'static str {
         DayOfWeek::Friday => "Fri",
         DayOfWeek::Saturday => "Sat",
         DayOfWeek::Sunday => "Sun",
-    }
-}
-
-fn habit_occurrence_state_label(state: HabitOccurrenceState) -> &'static str {
-    match state {
-        HabitOccurrenceState::Pending => "pending",
-        HabitOccurrenceState::Scheduled => "scheduled",
-        HabitOccurrenceState::Done => "done",
-        HabitOccurrenceState::Skipped => "skipped",
-        HabitOccurrenceState::Snoozed => "snoozed",
     }
 }
 
@@ -7299,15 +4204,6 @@ fn normalized_iana_timezone(value: &str) -> String {
     "UTC".into()
 }
 
-fn list_view_type_label(view_type: &ListViewType) -> &'static str {
-    match view_type {
-        ListViewType::List => "list",
-        ListViewType::Board => "board",
-        ListViewType::Calendar => "calendar",
-        ListViewType::Gantt => "gantt",
-    }
-}
-
 fn milestone_status_label(status: &MilestoneStatus) -> &'static str {
     match status {
         MilestoneStatus::NotDone => "not done",
@@ -7326,11 +4222,11 @@ fn milestone_status_color(status: &MilestoneStatus, palette: Palette) -> Color32
 
 fn automation_action_label(action_type: &AutomationActionType) -> String {
     match action_type {
-        AutomationActionType::Move => "Move".to_string(),
-        AutomationActionType::UpdateDue => "Update due".to_string(),
-        AutomationActionType::Classify => "Classify".to_string(),
-        AutomationActionType::CreateTask => "Create task".to_string(),
-        AutomationActionType::UpdateStatus => "Update status".to_string(),
+        AutomationActionType::Move => "タスクの所属を変更".to_string(),
+        AutomationActionType::UpdateDue => "期限を変更".to_string(),
+        AutomationActionType::Classify => "タスクを分類".to_string(),
+        AutomationActionType::CreateTask => "タスクを作成".to_string(),
+        AutomationActionType::UpdateStatus => "ステータスを変更".to_string(),
         AutomationActionType::Other(value) => value.clone(),
     }
 }
@@ -7340,7 +4236,7 @@ fn automation_log_title(log: &AutomationLog) -> Option<String> {
         .as_ref()
         .and_then(|value| value.get("title"))
         .and_then(|value| value.as_str())
-        .map(|title| format!("Task: {title}"))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
