@@ -246,6 +246,7 @@ mod tests {
                     end_date_exclusive: date!(2026 - 08 - 16),
                     timezone: "Asia/Tokyo".into(),
                     named_hours: vec![],
+                    not_before: None,
                 },
             })
             .await

@@ -117,6 +117,7 @@ async fn run_pipeline(state: &AppState) -> WorkerRunSummary {
         end_date_exclusive,
         timezone: timezone_name.clone(),
         named_hours: Vec::new(),
+        not_before: Some(OffsetDateTime::now_utc()),
     };
     let preview = match preview_auto_schedule(state, request).await {
         Ok(preview) => preview,

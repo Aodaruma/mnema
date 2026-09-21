@@ -500,6 +500,7 @@ async fn run_plan(vault: &Vault, args: PlanArgs, json: bool) -> Result<()> {
             end_date_exclusive,
             timezone: timezone_name.clone(),
             named_hours: options.named_hours.clone(),
+            not_before: None,
         })
         .await?;
 

@@ -288,7 +288,10 @@ fn unscheduled_reason_label(reason: UnscheduledItemReason) -> &'static str {
         UnscheduledItemReason::InvalidDuration => "所要時間が不正です",
         UnscheduledItemReason::NoAvailability => "利用可能時間がありません",
         UnscheduledItemReason::NoAllowedWindow => "希望時間帯に空きがありません",
-        UnscheduledItemReason::InsufficientContiguousTime => "連続した空き時間が不足しています",
+        UnscheduledItemReason::InsufficientContiguousTime => "必要な空き時間が不足しています",
+        UnscheduledItemReason::DependencyBlocked => {
+            "先行タスクを配置できません（依存先・循環を確認してください）"
+        }
     }
 }
 

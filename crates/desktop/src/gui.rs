@@ -2165,6 +2165,7 @@ impl MnemaGuiApp {
             end_date_exclusive,
             timezone: self.timezone_offset.trim().to_owned(),
             named_hours: vec!["work".into()],
+            not_before: None,
         };
         let result = self.runtime.block_on(async move {
             let tasks = vault.task_repo();

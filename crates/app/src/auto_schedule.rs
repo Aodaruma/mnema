@@ -29,6 +29,9 @@ pub struct AutoScheduleRequest {
     pub timezone: String,
     /// Empty selects every configured named-hours policy.
     pub named_hours: Vec<String>,
+    /// Freeze this cutoff in the preview so Apply can revalidate it exactly.
+    #[serde(default)]
+    pub not_before: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -223,6 +226,17 @@ impl<'a> AutoScheduleService<'a> {
             .schedule_blocks
             .list_overlapping(planning_window.start, planning_window.end)
             .await?;
+        // An elapsed or already-started proposal is preserved byte-for-byte.
+        // Treat it as fixed while planning the remaining time.
+        let mut planning_existing = existing.clone();
+        for block in &mut planning_existing {
+            if request
+                .not_before
+                .is_some_and(|cutoff| block.start_at < cutoff)
+            {
+                block.locked = true;
+            }
+        }
         let travel_policy =
             TravelBufferPolicy::symmetric(preferences.default_travel_buffer_minutes);
         let mut queried_travel_policy = TravelBufferPolicy {
@@ -248,8 +262,8 @@ impl<'a> AutoScheduleService<'a> {
                 .list_overlapping(event_query_window.start, event_query_window.end)
                 .await?;
         }
-        let fixed_items = fixed_schedule_item_keys(&existing);
-        let mut hard_busy = schedule_block_busy_blocks(&existing, planning_window);
+        let fixed_items = fixed_schedule_item_keys(&planning_existing);
+        let mut hard_busy = schedule_block_busy_blocks(&planning_existing, planning_window);
         hard_busy.extend(external_event_busy_blocks(&events, planning_window));
         if let Some(sleep) = &preferences.sleep {
             hard_busy.extend(
@@ -273,30 +287,122 @@ impl<'a> AutoScheduleService<'a> {
 
         let tasks = self.tasks.list_all().await?;
         let done_status_ids = self.done_status_ids(&tasks).await?;
+        let completed = tasks
+            .iter()
+            .filter(|task| done_status_ids.contains(&task.status_id))
+            .map(|task| task.id.clone())
+            .collect::<HashSet<_>>();
+        let timezone_ref = timezones::get_by_name(timezone)
+            .ok_or_else(|| AppError::InvalidTimezone(timezone.to_owned()))?;
+        let fixed_ends = planning_existing
+            .iter()
+            .filter(|block| !is_replaceable_proposal(block))
+            .filter(|block| {
+                !matches!(
+                    block.state,
+                    ScheduleBlockState::Cancelled | ScheduleBlockState::Missed
+                )
+            })
+            .filter_map(|block| block.task_id.clone().map(|id| (id, block.end_at)))
+            .fold(
+                HashMap::<TaskId, OffsetDateTime>::new(),
+                |mut ends, (id, end)| {
+                    ends.entry(id)
+                        .and_modify(|value| *value = (*value).max(end))
+                        .or_insert(end);
+                    ends
+                },
+            );
+        let fixed_minutes = planning_existing
+            .iter()
+            .filter(|block| !is_replaceable_proposal(block))
+            .filter(|block| {
+                !matches!(
+                    block.state,
+                    ScheduleBlockState::Cancelled | ScheduleBlockState::Missed
+                )
+            })
+            .filter_map(|block| {
+                block.task_id.clone().map(|id| {
+                    (
+                        id,
+                        u32::try_from((block.end_at - block.start_at).whole_minutes())
+                            .unwrap_or_default(),
+                    )
+                })
+            })
+            .fold(
+                HashMap::<TaskId, u32>::new(),
+                |mut minutes, (id, duration)| {
+                    let value = minutes.entry(id).or_default();
+                    *value = value.saturating_add(duration);
+                    minutes
+                },
+            );
+        let fully_fixed = tasks
+            .iter()
+            .filter(|task| {
+                fixed_minutes.get(&task.id).is_some_and(|minutes| {
+                    *minutes
+                        >= task
+                            .estimated_minutes
+                            .filter(|minutes| *minutes > 0)
+                            .unwrap_or(self.default_task_minutes)
+                })
+            })
+            .map(|task| task.id.clone())
+            .collect::<HashSet<_>>();
         let mut items = tasks
             .into_iter()
             .filter(|task| task.deleted_at.is_none())
             .filter(|task| !done_status_ids.contains(&task.status_id))
-            .filter(|task| !fixed_items.contains(&AutoScheduleItemKey::Task(task.id.clone())))
+            .filter(|task| !fully_fixed.contains(&task.id))
             .filter(|task| {
                 task.start_date
                     .is_none_or(|start| start < request.end_date_exclusive)
             })
-            .map(|task| SchedulableItem {
-                item_ref: ScheduleItemRef::Task(task.id.clone()),
-                kind: ScheduleItemKind::Task,
-                tier: ScheduleItemTier::Task,
-                title: task.title,
-                duration_minutes: task
-                    .estimated_minutes
-                    .filter(|minutes| *minutes > 0)
-                    .unwrap_or(self.default_task_minutes),
-                due: task.due_date,
-                importance: task.cost_points.unwrap_or_default(),
-                created_at: task.created_at,
-                allowed_windows: Vec::new(),
+            .map(|task| {
+                let start = task
+                    .start_date
+                    .map(|date| local_datetime(date, Time::MIDNIGHT, timezone_ref, true, timezone))
+                    .transpose()?;
+                let dependency_end = task
+                    .dependencies
+                    .iter()
+                    .filter_map(|id| fixed_ends.get(id))
+                    .max()
+                    .copied();
+                Ok(SchedulableItem {
+                    item_ref: ScheduleItemRef::Task(task.id.clone()),
+                    kind: ScheduleItemKind::Task,
+                    tier: ScheduleItemTier::Task,
+                    title: task.title,
+                    duration_minutes: task
+                        .estimated_minutes
+                        .filter(|minutes| *minutes > 0)
+                        .unwrap_or(self.default_task_minutes)
+                        .saturating_sub(fixed_minutes.get(&task.id).copied().unwrap_or_default()),
+                    due: task.due_date,
+                    importance: task.cost_points.unwrap_or_default(),
+                    created_at: task.created_at,
+                    allowed_windows: Vec::new(),
+                    not_before: start
+                        .into_iter()
+                        .chain(request.not_before)
+                        .chain(dependency_end)
+                        .chain(fixed_ends.get(&task.id).copied())
+                        .max(),
+                    dependencies: task
+                        .dependencies
+                        .iter()
+                        .filter(|id| !completed.contains(id) && !fully_fixed.contains(id))
+                        .cloned()
+                        .map(ScheduleItemRef::Task)
+                        .collect(),
+                    minimum_chunk_minutes: Some(15),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<AppResult<Vec<_>>>()?;
 
         let habit_service = HabitService::new(self.habits, self.occurrences);
         let occurrence_expansion = habit_service
@@ -342,15 +448,58 @@ impl<'a> AutoScheduleService<'a> {
                 importance: 0,
                 created_at: occurrence.created_at,
                 allowed_windows,
+                not_before: request.not_before,
+                dependencies: Vec::new(),
+                minimum_chunk_minutes: None,
             });
         }
 
-        let output = self.scheduler.plan_items(ItemSchedulingInput {
+        let mut output = self.scheduler.plan_items(ItemSchedulingInput {
             items,
             availability: availability.clone(),
             hard_busy: hard_busy.clone(),
         });
-        let proposed_blocks = proposed_schedule_blocks(&output, OffsetDateTime::now_utc());
+        for block in existing
+            .iter()
+            .filter(|block| is_replaceable_proposal(block))
+            .filter(|block| {
+                request
+                    .not_before
+                    .is_some_and(|cutoff| block.start_at < cutoff)
+            })
+        {
+            if let Some(item) = block_item_key(block) {
+                let item_ref = ScheduleItemRef::from(&item);
+                output
+                    .blocks
+                    .push(mnema_scheduler::ProposedItemScheduleBlock {
+                        kind: item_ref.kind(),
+                        item_ref,
+                        tier: if block.habit_occurrence_id.is_some() {
+                            ScheduleItemTier::RequiredHabit
+                        } else {
+                            ScheduleItemTier::Task
+                        },
+                        title: block.title_snapshot.clone().unwrap_or_default(),
+                        window: TimeWindow::new(block.start_at, block.end_at),
+                        required_minutes: block.required_minutes.unwrap_or_default(),
+                    });
+            }
+        }
+        let mut proposed_blocks = proposed_schedule_blocks(&output, OffsetDateTime::now_utc());
+        for proposed in &mut proposed_blocks {
+            if request
+                .not_before
+                .is_some_and(|cutoff| proposed.start_at < cutoff)
+                && let Some(original) = existing.iter().find(|block| {
+                    block_item_key(block) == block_item_key(proposed)
+                        && block.start_at == proposed.start_at
+                        && block.end_at == proposed.end_at
+                })
+            {
+                *proposed = original.clone();
+            }
+        }
         let mut diff = diff_auto_schedule(&existing, &output);
         diff.fingerprint = auto_schedule_context_fingerprint(
             &request,
@@ -936,24 +1085,31 @@ pub fn reconcile_proposed_block_ids(
     existing: &[ScheduleBlock],
     proposed: &[ScheduleBlock],
 ) -> Vec<ScheduleBlock> {
-    let existing_by_item = existing
+    let mut candidates = existing
         .iter()
         .filter(|block| is_replaceable_proposal(block))
-        .filter_map(|block| block_item_key(block).map(|item| (item, block)))
-        .collect::<BTreeMap<_, _>>();
-    proposed
-        .iter()
-        .cloned()
-        .map(|mut block| {
-            if let Some(existing) =
-                block_item_key(&block).and_then(|item| existing_by_item.get(&item).copied())
-            {
-                block.id = existing.id.clone();
-                block.created_at = existing.created_at;
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|block| (block.start_at, block.end_at, block.id.clone()));
+    let mut result = proposed.to_vec();
+    let mut matched = HashSet::new();
+    // Match unchanged chunks first; inserting a chunk must not steal their IDs.
+    for exact in [true, false] {
+        for (index, block) in result.iter_mut().enumerate() {
+            if matched.contains(&index) {
+                continue;
             }
-            block
-        })
-        .collect()
+            if let Some(position) = candidates.iter().position(|old| {
+                block_item_key(old) == block_item_key(block)
+                    && (!exact || (old.start_at == block.start_at && old.end_at == block.end_at))
+            }) {
+                let old = candidates.remove(position);
+                block.id = old.id.clone();
+                block.created_at = old.created_at;
+                matched.insert(index);
+            }
+        }
+    }
+    result
 }
 
 fn same_schedule_block_snapshot(left: &[ScheduleBlock], right: &[ScheduleBlock]) -> bool {
@@ -979,34 +1135,34 @@ pub fn diff_auto_schedule(
         let Some(item) = block_item_key(block) else {
             continue;
         };
-        before.entry(item.clone()).or_insert(AutoPlanBlockSnapshot {
-            block_id: Some(block.id.clone()),
-            item,
-            title: block
-                .title_snapshot
-                .clone()
-                .unwrap_or_else(|| "(untitled)".into()),
-            start_at: block.start_at,
-            end_at: block.end_at,
-        });
+        before
+            .entry(item.clone())
+            .or_insert_with(Vec::new)
+            .push(AutoPlanBlockSnapshot {
+                block_id: Some(block.id.clone()),
+                item,
+                title: block
+                    .title_snapshot
+                    .clone()
+                    .unwrap_or_else(|| "(untitled)".into()),
+                start_at: block.start_at,
+                end_at: block.end_at,
+            });
     }
-    let after = proposed
-        .blocks
-        .iter()
-        .map(|block| {
-            let item = AutoScheduleItemKey::from(&block.item_ref);
-            (
-                item.clone(),
-                AutoPlanBlockSnapshot {
-                    block_id: None,
-                    item,
-                    title: block.title.clone(),
-                    start_at: block.window.start,
-                    end_at: block.window.end,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut after = BTreeMap::<AutoScheduleItemKey, Vec<AutoPlanBlockSnapshot>>::new();
+    for block in &proposed.blocks {
+        let item = AutoScheduleItemKey::from(&block.item_ref);
+        after
+            .entry(item.clone())
+            .or_default()
+            .push(AutoPlanBlockSnapshot {
+                block_id: None,
+                item,
+                title: block.title.clone(),
+                start_at: block.window.start,
+                end_at: block.window.end,
+            });
+    }
     let keys = before
         .keys()
         .chain(after.keys())
@@ -1014,22 +1170,39 @@ pub fn diff_auto_schedule(
         .collect::<BTreeSet<_>>();
     let mut changes = Vec::with_capacity(keys.len());
     for item in keys {
-        let old = before.get(&item).cloned();
-        let new = after.get(&item).cloned();
-        let (kind, reason) = auto_change_kind(old.as_ref(), new.as_ref());
-        let title = new
-            .as_ref()
-            .or(old.as_ref())
-            .map(|block| block.title.clone())
-            .unwrap_or_default();
-        changes.push(AutoPlanChange {
-            kind,
-            item,
-            title,
-            before: old,
-            after: new,
-            reason,
-        });
+        let mut old = before.remove(&item).unwrap_or_default();
+        let mut new = after.remove(&item).unwrap_or_default();
+        new.sort_by_key(|block| (block.start_at, block.end_at));
+        let mut pairs = Vec::new();
+        for block in new {
+            let exact = old
+                .iter()
+                .position(|prior| prior.start_at == block.start_at && prior.end_at == block.end_at);
+            let prior = exact.map(|index| old.remove(index));
+            pairs.push((prior, Some(block)));
+        }
+        for (prior, _) in &mut pairs {
+            if prior.is_none() && !old.is_empty() {
+                *prior = Some(old.remove(0));
+            }
+        }
+        pairs.extend(old.into_iter().map(|prior| (Some(prior), None)));
+        for (old, new) in pairs {
+            let (kind, reason) = auto_change_kind(old.as_ref(), new.as_ref());
+            let title = new
+                .as_ref()
+                .or(old.as_ref())
+                .map(|block| block.title.clone())
+                .unwrap_or_default();
+            changes.push(AutoPlanChange {
+                kind,
+                item: item.clone(),
+                title,
+                before: old,
+                after: new,
+                reason,
+            });
+        }
     }
     let bytes = serde_json::to_vec(&changes).expect("auto-schedule diff is serializable");
     let fingerprint = Sha256::digest(bytes)
@@ -1692,6 +1865,9 @@ mod tests {
                 importance: 0,
                 created_at: occurrence.created_at,
                 allowed_windows: allowed,
+                not_before: None,
+                dependencies: vec![],
+                minimum_chunk_minutes: None,
             });
             date = date.next_day().unwrap();
         }
@@ -1745,6 +1921,7 @@ mod tests {
                 end_date_exclusive: date!(2026 - 03 - 09),
                 timezone: "Asia/Tokyo".into(),
                 named_hours: vec!["work".into()],
+                not_before: None,
             })
             .await
             .unwrap();
@@ -1819,6 +1996,7 @@ mod tests {
                 end_date_exclusive: date!(2026 - 08 - 16),
                 timezone: "UTC".into(),
                 named_hours: vec!["work".into()],
+                not_before: None,
             })
             .await
             .unwrap();
@@ -1977,6 +2155,7 @@ mod tests {
             end_date_exclusive: date!(2026 - 08 - 18),
             timezone: "Asia/Tokyo".into(),
             named_hours: vec!["work".into()],
+            not_before: None,
         };
 
         assert!(occurrences.0.lock().unwrap().is_empty());

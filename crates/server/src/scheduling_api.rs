@@ -607,6 +607,7 @@ async fn resolve_auto_request(
         end_date_exclusive,
         timezone,
         named_hours: input.named_hours,
+        not_before: None,
     })
 }
 
