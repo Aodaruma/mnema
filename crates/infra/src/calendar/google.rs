@@ -83,7 +83,11 @@ impl GoogleCalendarAdapter {
     #[must_use]
     pub fn new(config: GoogleCalendarConfig, credentials: Arc<dyn CredentialStore>) -> Self {
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("HTTP client configuration is valid"),
             config,
             credentials,
         }
@@ -189,10 +193,10 @@ impl GoogleCalendarAdapter {
         }
 
         let response = self
-            .http
-            .post(&self.config.token_endpoint)
-            .form(&form)
-            .send()
+            .send_with_retry(
+                self.http.post(&self.config.token_endpoint).form(&form),
+                true,
+            )
             .await?;
         let token = parse_token_response(response, Some(previous)).await?;
         self.credentials.save(account_id, token.clone()).await?;
@@ -218,21 +222,14 @@ impl GoogleCalendarAdapter {
     ) -> Result<reqwest::Response, CalendarError> {
         let access_token = self.access_token(account_id.clone()).await?;
         let response = self
-            .http
-            .get(url.clone())
-            .bearer_auth(access_token)
-            .send()
+            .send_with_retry(self.http.get(url.clone()).bearer_auth(access_token), true)
             .await?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
         let refreshed = self.refresh_access_token(account_id).await?;
-        Ok(self
-            .http
-            .get(url)
-            .bearer_auth(refreshed.access_token)
-            .send()
-            .await?)
+        self.send_with_retry(self.http.get(url).bearer_auth(refreshed.access_token), true)
+            .await
     }
 
     async fn send_json(
@@ -244,30 +241,97 @@ impl GoogleCalendarAdapter {
         expected_etag: Option<&str>,
     ) -> Result<reqwest::Response, CalendarError> {
         let access_token = self.access_token(account_id.clone()).await?;
+        let retry_safe =
+            method != Method::POST || body.as_ref().and_then(|body| body.get("id")).is_some();
         let response = self
-            .json_request(
-                method.clone(),
-                url.clone(),
-                &access_token,
-                body.as_ref(),
-                expected_etag,
-            )?
-            .send()
+            .send_with_retry(
+                self.json_request(
+                    method.clone(),
+                    url.clone(),
+                    &access_token,
+                    body.as_ref(),
+                    expected_etag,
+                )?,
+                retry_safe,
+            )
             .await?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
         let refreshed = self.refresh_access_token(account_id).await?;
-        Ok(self
-            .json_request(
+        self.send_with_retry(
+            self.json_request(
                 method,
                 url,
                 &refreshed.access_token,
                 body.as_ref(),
                 expected_etag,
-            )?
-            .send()
-            .await?)
+            )?,
+            retry_safe,
+        )
+        .await
+    }
+
+    /// Bounded exponential backoff. Never replay a non-idempotent calendar
+    /// creation or OAuth code exchange after an ambiguous transport failure.
+    async fn send_with_retry(
+        &self,
+        request: reqwest::RequestBuilder,
+        retry_safe: bool,
+    ) -> Result<reqwest::Response, CalendarError> {
+        for attempt in 0..4_u32 {
+            let result = request
+                .try_clone()
+                .ok_or_else(|| {
+                    CalendarError::InvalidResponse("request body is not replayable".into())
+                })?
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await;
+            let mut retry_after = None;
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    let transient =
+                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    if !retry_safe || (!transient && status != StatusCode::FORBIDDEN) {
+                        return Ok(response);
+                    }
+                    retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<u64>().ok());
+                    let body = response.text().await?;
+                    let rate_limited =
+                        status == StatusCode::FORBIDDEN && google_rate_limited(&body);
+                    if attempt == 3 || (!transient && !rate_limited) {
+                        return Err(CalendarError::Provider {
+                            status: status.as_u16(),
+                            body,
+                        });
+                    }
+                }
+                Err(error) => {
+                    if !retry_safe
+                        || attempt == 3
+                        || !(error.is_timeout() || error.is_connect() || error.is_request())
+                    {
+                        return Err(CalendarError::Http(error.without_url()));
+                    }
+                }
+            }
+            let jitter = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_millis() as u64;
+            let millis = retry_after
+                .map(|seconds| seconds.saturating_mul(1000))
+                .unwrap_or((500_u64 << attempt) + jitter)
+                .min(30_000);
+            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+        }
+        unreachable!("retry loop returns after its final attempt")
     }
 
     fn json_request(
@@ -729,6 +793,25 @@ impl CalendarWriteApi for GoogleCalendarAdapter {
         checked_response(response).await?;
         Ok(())
     }
+}
+
+fn google_rate_limited(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/errors")
+                .and_then(Value::as_array)
+                .map(|errors| {
+                    errors.iter().any(|error| {
+                        matches!(
+                            error.get("reason").and_then(Value::as_str),
+                            Some("rateLimitExceeded" | "userRateLimitExceeded")
+                        )
+                    })
+                })
+        })
+        .unwrap_or(false)
 }
 
 fn google_scope(access_mode: CalendarAccessMode) -> String {
@@ -1193,6 +1276,48 @@ mod tests {
             token_endpoint: GOOGLE_TOKEN_URL.into(),
             api_base_url: GOOGLE_CALENDAR_API_BASE_URL.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn transient_and_rate_limit_errors_retry_but_permission_errors_do_not() {
+        let account = account();
+        for status in [429, 503, 403] {
+            let (adapter, server) = adapter_for_mock(
+                &account,
+                vec![
+                    (
+                        status,
+                        r#"{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}"#,
+                    ),
+                    (200, r#"{"items":[]}"#),
+                ],
+            )
+            .await;
+            assert!(adapter.list_calendars(&account).await.unwrap().is_empty());
+            server.await.unwrap();
+        }
+        let (adapter, server) = adapter_for_mock(
+            &account,
+            vec![(403, r#"{"error":{"errors":[{"reason":"forbidden"}]}}"#)],
+        )
+        .await;
+        assert!(matches!(
+            adapter.list_calendars(&account).await,
+            Err(CalendarError::Provider { status: 403, .. })
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn calendar_creation_is_not_replayed_on_ambiguous_failure() {
+        let mut account = account();
+        account.managed_calendar_id = None;
+        let (adapter, server) = adapter_for_mock(&account, vec![(503, "unavailable")]).await;
+        assert!(matches!(
+            adapter.ensure_managed_calendar(&account, "Mnema").await,
+            Err(CalendarError::Provider { status: 503, .. })
+        ));
+        server.await.unwrap();
     }
 
     fn account() -> CalendarAccount {
